@@ -1,0 +1,227 @@
+---
+title: "Server Options Configuration Reference"
+sidebarTitle: "Server Options"
+description: "Complete reference for all wisp.options properties — control hostname filtering, IP restrictions, stream limits, DNS resolution, and Wisp v2 protocol settings."
+---
+
+`wisp.options` is a plain mutable object that controls every aspect of the server's runtime behaviour. Changes take effect immediately for all new connections and streams — no restart required. The object is exported as part of the `server` namespace and is also used internally by `ServerConnection`, `WSProxyConnection`, and the filter and DNS modules.
+
+## Import and Mutation
+
+```js
+import { server as wisp } from "@mercuryworkshop/wisp-js/server";
+
+// Read a current value
+console.log(wisp.options.wisp_version); // 2
+
+// Change a value — takes effect for all subsequent connections
+wisp.options.wisp_motd = "Welcome to my Wisp server!";
+wisp.options.allow_private_ips = false;
+wisp.options.hostname_blacklist = [/\.example\.com$/, /^ads\./];
+```
+
+---
+
+## Destination Hostname Restrictions
+
+These options control which hostnames, IP addresses, and ports the server is willing to proxy to. All checks are performed in `filter.is_stream_allowed()` before the outbound socket is opened.
+
+<ParamField path="hostname_blacklist" type="RegExp[] | null" default={null}>
+  An array of regular expressions tested against the destination hostname. If any pattern matches, the stream is refused with `HostBlocked`. Mutually exclusive with `hostname_whitelist` — if both are set, only `hostname_whitelist` is evaluated.
+
+  ```js
+  // Block all .ru and .cn domains
+  wisp.options.hostname_blacklist = [/\.ru$/, /\.cn$/];
+  ```
+</ParamField>
+
+<ParamField path="hostname_whitelist" type="RegExp[] | null" default={null}>
+  An array of regular expressions. The connection is allowed only if **at least one** pattern matches the destination hostname. If none match, the stream is refused with `HostBlocked`. Takes precedence over `hostname_blacklist` when both are non-null.
+
+  ```js
+  // Only allow connections to *.example.com
+  wisp.options.hostname_whitelist = [/^(.+\.)?example\.com$/];
+  ```
+</ParamField>
+
+<ParamField path="port_blacklist" type="Array<number | [number, number]> | null" default={null}>
+  An array of port numbers or `[min, max]` range tuples. Streams to a matching port are refused with `HostBlocked`. Mutually exclusive with `port_whitelist`.
+
+  ```js
+  // Block SMTP (25) and the range 1–1023
+  wisp.options.port_blacklist = [25, [1, 1023]];
+  ```
+</ParamField>
+
+<ParamField path="port_whitelist" type="Array<number | [number, number]> | null" default={null}>
+  An array of port numbers or `[min, max]` range tuples. Only streams to a matching port are allowed. Takes precedence over `port_blacklist`.
+
+  ```js
+  // Only allow HTTP and HTTPS
+  wisp.options.port_whitelist = [80, 443];
+  ```
+</ParamField>
+
+<ParamField path="allow_direct_ip" type="boolean" default={true}>
+  When `false`, clients may not connect to a raw IP address — the destination must be a hostname that resolves through DNS. Streams to bare IPs are refused with `HostBlocked`.
+</ParamField>
+
+<ParamField path="allow_private_ips" type="boolean" default={false}>
+  When `false` (the default), connections to private RFC-1918 address ranges (`10.x.x.x`, `172.16.x.x–172.31.x.x`, `192.168.x.x`), link-local (`169.254.x.x`), carrier-grade NAT, and other reserved ranges are refused. Set to `true` only if your deployment intentionally proxies traffic to internal services.
+</ParamField>
+
+<ParamField path="allow_loopback_ips" type="boolean" default={false}>
+  When `false` (the default), connections to `127.x.x.x` (IPv4 loopback) and `::1` (IPv6 loopback / unspecified) are refused. Enable with care — allowing loopback access lets clients reach services bound only to localhost on the server machine.
+</ParamField>
+
+---
+
+## Client Connection Restrictions
+
+These options cap how many streams a client can open and which transport protocols are permitted.
+
+<ParamField path="allow_tcp_streams" type="boolean" default={true}>
+  When `false`, all `CONNECT` packets requesting a TCP stream are refused with `HostBlocked`. Clients that need only UDP (e.g. DNS-over-UDP relays) can be served with TCP disabled.
+</ParamField>
+
+<ParamField path="allow_udp_streams" type="boolean" default={true}>
+  When `false`, all `CONNECT` packets requesting a UDP stream are refused with `HostBlocked`. Also controls whether the `UDPExtension` is advertised during the Wisp v2 handshake.
+</ParamField>
+
+<ParamField path="stream_limit_per_host" type="number" default={-1}>
+  Maximum number of simultaneous open streams per destination hostname across a single connection. `-1` means unlimited. When the limit is reached, new streams to that hostname are refused with `ConnThrottled`.
+</ParamField>
+
+<ParamField path="stream_limit_total" type="number" default={-1}>
+  Maximum total number of simultaneous open streams per connection. `-1` means unlimited. When the limit is reached, any new stream is refused with `ConnThrottled`.
+
+  ```js
+  // Allow at most 32 concurrent streams per connection,
+  // with no more than 4 to the same host
+  wisp.options.stream_limit_total = 32;
+  wisp.options.stream_limit_per_host = 4;
+  ```
+</ParamField>
+
+---
+
+## DNS Options
+
+Controls how the server resolves destination hostnames before checking IP-based filters.
+
+<ParamField path="dns_ttl" type="number" default={120}>
+  How long, in **seconds**, to cache DNS results. Resolved addresses (and lookup errors) are kept for this duration before the next request triggers a fresh lookup.
+</ParamField>
+
+<ParamField path="dns_method" type="'lookup' | 'resolve' | function" default="'lookup'">
+  The resolution strategy:
+
+  - `'lookup'` — uses Node's `dns.lookup()`, which queries the operating-system resolver (respects `/etc/hosts`, `nsswitch.conf`, etc.).
+  - `'resolve'` — uses `dns.Resolver` with `resolve4`/`resolve6`, which bypasses the OS resolver and contacts DNS servers directly. Required when `dns_servers` is set.
+  - A **custom function** `(hostname: string) => Promise<string>` — called with the hostname, must return a resolved IP address string.
+
+  ```js
+  // Use a custom async resolver
+  wisp.options.dns_method = async (hostname) => {
+    return await myCustomResolver(hostname);
+  };
+  ```
+</ParamField>
+
+<ParamField path="dns_servers" type="string[] | null" default={null}>
+  An array of DNS server addresses (e.g. `["8.8.8.8", "1.1.1.1"]`) passed to `resolver.setServers()`. Only used when `dns_method` is `'resolve'`. Set to `null` to use the system-configured nameservers.
+
+  ```js
+  wisp.options.dns_method = "resolve";
+  wisp.options.dns_servers = ["8.8.8.8", "8.8.4.4"];
+  ```
+</ParamField>
+
+<ParamField path="dns_result_order" type="string" default="'verbatim'">
+  Controls which address family is preferred when a hostname resolves to both IPv4 and IPv6 addresses. Mirrors the Node.js `dns.lookup` `order` option:
+
+  - `'verbatim'` — return addresses in the order the DNS server returns them (default).
+  - `'ipv4first'` — prefer IPv4 addresses.
+  - `'ipv6first'` — prefer IPv6 addresses.
+</ParamField>
+
+---
+
+## Real IP Options
+
+Controls whether the server reads client IP addresses from reverse-proxy forwarding headers.
+
+<ParamField path="parse_real_ip" type="boolean" default={true}>
+  When `true`, the server reads `X-Forwarded-For` or `X-Real-IP` from the upgrade request headers if the direct connection IP is in `parse_real_ip_from`. Set to `false` to always use the raw TCP connection address.
+</ParamField>
+
+<ParamField path="parse_real_ip_from" type="string[]" default={["127.0.0.1"]}>
+  An array of IP addresses that are trusted to supply accurate forwarding headers. Only connections arriving from one of these addresses will have their `X-Forwarded-For` / `X-Real-IP` headers honoured. Defaults to `['127.0.0.1']` (local nginx/caddy on the same machine).
+
+  ```js
+  // Trust forwarding headers from localhost (IPv4 and IPv6) and a known proxy
+  wisp.options.parse_real_ip_from = ["127.0.0.1", "::1", "10.0.0.1"];
+  ```
+</ParamField>
+
+---
+
+## Wisp v2 Options
+
+<ParamField path="wisp_version" type="1 | 2" default={2}>
+  The default Wisp protocol version negotiated for new connections. Set to `1` to force legacy mode globally. Can be overridden per-connection via the `conn_options` argument to `routeRequest`.
+
+  ```js
+  // Force all connections to use Wisp v1
+  wisp.options.wisp_version = 1;
+  ```
+</ParamField>
+
+<ParamField path="wisp_motd" type="string | null" default={null}>
+  An optional Message-of-the-Day string sent to clients in a `MOTDExtension` payload during the Wisp v2 `INFO` handshake. Set to `null` to disable the MOTD extension entirely.
+
+  ```js
+  wisp.options.wisp_motd = "Welcome! Please read our ToS at https://example.com/tos";
+  ```
+</ParamField>
+
+---
+
+## Full Configuration Example
+
+The following shows all options set explicitly, mirroring their default values unless noted:
+
+```js
+import { server as wisp } from "@mercuryworkshop/wisp-js/server";
+
+Object.assign(wisp.options, {
+  // --- Destination Hostname Restrictions ---
+  hostname_blacklist: null,       // No hostname blacklist
+  hostname_whitelist: null,       // No hostname whitelist (allow all)
+  port_blacklist: null,           // No port blacklist
+  port_whitelist: null,           // No port whitelist (allow all)
+  allow_direct_ip: true,          // Allow bare IP addresses as destinations
+  allow_private_ips: false,       // Block RFC-1918 / private ranges
+  allow_loopback_ips: false,      // Block 127.x.x.x / ::1
+
+  // --- Client Connection Restrictions ---
+  allow_tcp_streams: true,        // Allow TCP streams
+  allow_udp_streams: true,        // Allow UDP streams
+  stream_limit_per_host: -1,      // Unlimited streams per destination host
+  stream_limit_total: -1,         // Unlimited streams per connection
+
+  // --- DNS ---
+  dns_ttl: 120,                   // Cache DNS results for 120 seconds
+  dns_method: "lookup",           // Use OS resolver (respects /etc/hosts)
+  dns_servers: null,              // Use system nameservers
+  dns_result_order: "verbatim",   // Return addresses in DNS order
+
+  // --- Real IP ---
+  parse_real_ip: true,            // Read X-Forwarded-For / X-Real-IP
+  parse_real_ip_from: ["127.0.0.1"], // Trust forwarding headers from localhost only
+
+  // --- Wisp v2 ---
+  wisp_version: 2,                // Negotiate Wisp v2 by default
+  wisp_motd: null,                // No MOTD
+});
+```

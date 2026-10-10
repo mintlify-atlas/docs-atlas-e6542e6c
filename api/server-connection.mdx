@@ -1,0 +1,384 @@
+---
+title: "ServerConnection and ServerStream API"
+sidebarTitle: "ServerConnection"
+description: "API reference for ServerConnection and ServerStream — the core classes that manage a Wisp server-side WebSocket connection and its multiplexed TCP/UDP streams."
+---
+
+`ServerConnection` and `ServerStream` are the two central classes that power the Wisp server. A `ServerConnection` owns the WebSocket transport and manages the full lifecycle of a single client connection — performing the Wisp handshake, dispatching packets, and tracking every open stream. Each individual proxied TCP or UDP channel is represented by a `ServerStream`, which bridges the WebSocket send-buffer with the underlying network socket.
+
+## `ServerConnection` Class
+
+Manages a single Wisp WebSocket session: performs the protocol handshake, routes incoming packets to the correct stream, and tears down cleanly when the connection closes.
+
+### Constructor
+
+```js
+new ServerConnection(ws, path, options)
+```
+
+Creates a new `ServerConnection` wrapping an already-upgraded `ws` WebSocket object. The constructor wraps `ws` in an `AsyncWebSocket`, assigns a unique `conn_id`, and — when `wisp_version` is `2` and no explicit `wisp_extensions` list is given — calls `add_extensions()` automatically to populate the extension list from the global `options`.
+
+<ParamField path="ws" type="WebSocket" required>
+  A raw WebSocket instance that has already been upgraded from an HTTP request. On Node.js this is the object delivered by the `ws` library's `handleUpgrade` callback.
+</ParamField>
+
+<ParamField path="path" type="string" required>
+  The URL path of the WebSocket request (e.g. `"/wisp/"`). Stored on the instance for logging and routing context.
+</ParamField>
+
+<ParamField path="options" type="object">
+  Per-connection overrides. All fields are optional; any omitted value falls back to the corresponding global `wisp.options` setting or a built-in default.
+
+  <Expandable title="options fields">
+    <ParamField path="TCPSocket" type="class" default="NodeTCPSocket">
+      Constructor class used to create TCP sockets for outbound streams. Must implement the async socket interface: `connect()`, `recv()`, `send(data)`, `close()`, `pause()`, `resume()`. Defaults to the built-in `NodeTCPSocket`.
+    </ParamField>
+
+    <ParamField path="UDPSocket" type="class" default="NodeUDPSocket">
+      Constructor class used to create UDP sockets for outbound streams. Must implement the same interface as `TCPSocket`. Defaults to the built-in `NodeUDPSocket`.
+    </ParamField>
+
+    <ParamField path="ping_interval" type="number" default={30}>
+      How often, in seconds, the server sends a WebSocket-level `ping` frame. Set to a very large value to effectively disable pings. Pings are only sent when the underlying WebSocket exposes a `ping()` method (Node.js `ws` package).
+    </ParamField>
+
+    <ParamField path="wisp_version" type="1 | 2" default={2}>
+      Wisp protocol version to negotiate for this connection. When set to `2`, an `INFO` packet exchange is performed before the initial `CONTINUE` packet is sent. Falls back to `options.wisp_version` if not provided.
+    </ParamField>
+
+    <ParamField path="wisp_extensions" type="WispExtension[] | null" default={null}>
+      Explicit list of Wisp v2 extension objects to advertise during the handshake. When `null` and `wisp_version` is `2`, the list is built automatically from the global options via `add_extensions()`. Pass an empty array `[]` to disable all extensions.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Properties
+
+<ParamField path="ws" type="AsyncWebSocket">
+  The `AsyncWebSocket` wrapper around the raw WebSocket. Provides `send(packet)`, `recv()`, and `close()` with async semantics.
+</ParamField>
+
+<ParamField path="path" type="string">
+  The URL path passed to the constructor.
+</ParamField>
+
+<ParamField path="streams" type="object">
+  A plain object keyed by `stream_id` (number) whose values are `ServerStream` instances. Contains every currently-open stream on this connection.
+</ParamField>
+
+<ParamField path="conn_id" type="number">
+  A monotonically-increasing integer assigned at construction time. Used as a prefix in all log messages to disambiguate concurrent connections.
+</ParamField>
+
+<ParamField path="server_exts" type="object">
+  After the Wisp v2 handshake, a map of extension ID → server-side `WispExtension` instance for each extension that was negotiated with the client.
+</ParamField>
+
+<ParamField path="client_exts" type="object">
+  After the Wisp v2 handshake, a map of extension ID → client-side `WispExtension` instance for each extension that was negotiated with the client.
+</ParamField>
+
+<ParamField path="ping_interval" type="number">
+  The effective ping interval in seconds, resolved from the constructor option or the built-in default of `30`.
+</ParamField>
+
+<ParamField path="wisp_version" type="1 | 2">
+  The effective Wisp protocol version for this connection.
+</ParamField>
+
+<ParamField path="wisp_extensions" type="WispExtension[] | null">
+  The list of extensions used during the v2 handshake, or `null` for v1 connections.
+</ParamField>
+
+### Methods
+
+#### `setup()`
+
+```js
+await conn.setup()
+```
+
+Performs all one-time connection initialization:
+
+1. Calls `ws.connect()` to attach event handlers to the underlying WebSocket.
+2. If `wisp_version` is `2`, calls the internal `setup_wisp_v2()` helper which sends the server's `INFO` packet, waits for the client's `INFO` reply, and negotiates the shared extension set. Throws `HandshakeError` if the client closes the socket or sends an unexpected packet type before completing the handshake.
+3. Sends the initial `CONTINUE` packet with `stream_id: 0` and `buffer_remaining` equal to `ServerStream.buffer_size`.
+4. Schedules a `setInterval` ping task if `ws.ws.ping` is a function.
+
+**Returns:** `Promise<void>`
+
+#### `run()`
+
+```js
+await conn.run()
+```
+
+The main receive loop. Reads frames from the WebSocket in a tight `while (true)` loop and passes each binary frame to `route_packet()`. Text frames are logged as a warning and skipped. When the WebSocket closes (`recv()` returns `null`), the loop exits and `cleanup()` is called.
+
+This method is long-lived — it does not resolve until the client disconnects. Call `setup()` first.
+
+**Returns:** `Promise<void>`
+
+#### `cleanup()`
+
+```js
+await conn.cleanup()
+```
+
+Tears down the connection. Iterates over every entry in `streams` and calls `close_stream()` without a reason code (so no `CLOSE` packet is sent to the client for each individual stream). Clears the ping interval timer and closes the underlying WebSocket.
+
+**Returns:** `Promise<void>`
+
+#### `close_stream(stream_id, reason, quiet)`
+
+```js
+await conn.close_stream(stream_id, reason, quiet)
+```
+
+Closes a single stream and removes it from `conn.streams`.
+
+<ParamField path="stream_id" type="number" required>
+  The numeric ID of the stream to close.
+</ParamField>
+
+<ParamField path="reason" type="number | null" default={null}>
+  A Wisp `close_reasons` code. When non-null and `quiet` is `false`, a `CLOSE` packet is sent to the client and the closure is logged at `info` level.
+</ParamField>
+
+<ParamField path="quiet" type="boolean" default={false}>
+  When `true`, the closure is not logged even if `reason` is set. Used internally when the filter blocks a stream before it opens, so the client receives a `CLOSE` packet without a server-side log entry at `info` level.
+</ParamField>
+
+**Returns:** `Promise<void>`
+
+#### `route_packet(buffer)`
+
+```js
+conn.route_packet(buffer)
+```
+
+Parses a raw binary frame into a `WispPacket` and dispatches it based on packet type:
+
+- **`CONNECT`** — calls `create_stream()` with the parsed stream type, hostname, and port.
+- **`DATA`** — calls `stream.put_data()` on the matching stream, or logs a warning if no stream exists.
+- **`CONTINUE`** — logs a warning (the client should never send `CONTINUE`).
+- **`CLOSE`** — calls `close_stream()` with the packet's reason code.
+
+<ParamField path="buffer" type="WispBuffer" required>
+  A `WispBuffer` wrapping the raw binary frame received from the WebSocket.
+</ParamField>
+
+**Returns:** `void`
+
+#### `create_stream(stream_id, type, hostname, port)`
+
+```js
+conn.create_stream(stream_id, type, hostname, port)
+```
+
+Creates a `ServerStream` for a new client-initiated connection request and immediately registers it in `conn.streams`. Starts an async background task that:
+
+1. Calls `filter.is_stream_allowed()` to check all hostname, port, IP, and stream-count restrictions.
+2. If blocked, calls `close_stream()` in quiet mode and returns early.
+3. Otherwise calls `stream.setup()` which connects the underlying socket and starts the bidirectional proxy tasks. Any connection failure sends a `CLOSE` packet with reason `NetworkError`.
+
+<ParamField path="stream_id" type="number" required>
+  The stream ID from the client's `CONNECT` packet.
+</ParamField>
+
+<ParamField path="type" type="number" required>
+  Stream type constant from `stream_types`: `stream_types.TCP` or `stream_types.UDP`.
+</ParamField>
+
+<ParamField path="hostname" type="string" required>
+  The destination hostname or IP address, trimmed of whitespace.
+</ParamField>
+
+<ParamField path="port" type="number" required>
+  The destination port number.
+</ParamField>
+
+**Returns:** `void` (the connection attempt runs in the background)
+
+#### `add_extensions()`
+
+```js
+conn.add_extensions()
+```
+
+Populates `this.wisp_extensions` with the default extension set derived from the global `options`:
+
+- Adds a `UDPExtension` with an empty `server_config` when `options.allow_udp_streams` is `true`.
+- Adds a `MOTDExtension` carrying `options.wisp_motd` as its message when `options.wisp_motd` is set.
+
+Called automatically from the constructor when `wisp_version` is `2` and `wisp_extensions` was not passed explicitly. You can call it again after mutating `options` to refresh the list before `setup()` is called.
+
+**Returns:** `void`
+
+---
+
+## `ServerStream` Class
+
+Represents a single multiplexed stream within a `ServerConnection`. Bridges the WebSocket send-buffer (flow-controlled via `CONTINUE` packets) with an outbound TCP or UDP socket.
+
+### Static Properties
+
+<ParamField path="ServerStream.buffer_size" type="number" default={128}>
+  The size of the `AsyncQueue` used as the inbound send-buffer. Also the value advertised in `CONTINUE` packets back to the client. A `CONTINUE` packet is emitted every `buffer_size / 2` packets consumed from the queue.
+</ParamField>
+
+### Constructor
+
+```js
+new ServerStream(stream_id, conn, socket)
+```
+
+<ParamField path="stream_id" type="number" required>
+  The Wisp stream ID that uniquely identifies this stream within its parent connection.
+</ParamField>
+
+<ParamField path="conn" type="ServerConnection" required>
+  The parent `ServerConnection` instance. Used to send packets back to the client.
+</ParamField>
+
+<ParamField path="socket" type="NodeTCPSocket | NodeUDPSocket" required>
+  The outbound network socket wrapper. Must implement `connect()`, `recv()`, `send(data)`, `close()`, `pause()`, and `resume()`.
+</ParamField>
+
+### Properties
+
+<ParamField path="stream_id" type="number">
+  The Wisp stream ID for this stream.
+</ParamField>
+
+<ParamField path="conn" type="ServerConnection">
+  Reference to the parent connection.
+</ParamField>
+
+<ParamField path="socket" type="NodeTCPSocket | NodeUDPSocket">
+  The underlying outbound socket.
+</ParamField>
+
+<ParamField path="send_buffer" type="AsyncQueue">
+  An `AsyncQueue` of size `ServerStream.buffer_size` that buffers `DATA` payloads received from the client before they are forwarded to the TCP/UDP socket. The queue is closed when the stream ends.
+</ParamField>
+
+<ParamField path="packets_sent" type="number">
+  Running count of data packets forwarded from the WebSocket to the TCP/UDP socket. Used to determine when to send the next `CONTINUE` packet.
+</ParamField>
+
+### Methods
+
+#### `setup()`
+
+```js
+await stream.setup()
+```
+
+Calls `socket.connect()` to establish the outbound network connection, then launches the `tcp_to_ws()` and `ws_to_tcp()` proxy tasks as background promises. Any unhandled error in either task is caught, logged, and triggers `close()`.
+
+**Returns:** `Promise<void>` — resolves once the socket is connected and both proxy tasks have been started.
+
+#### `close(reason)`
+
+```js
+await stream.close(reason)
+```
+
+Shuts down the stream. Closes `send_buffer` (causing `ws_to_tcp()` to exit its loop) and calls `socket.close()`. If `reason` is non-null, sends a `CLOSE` packet to the client with that reason code.
+
+<ParamField path="reason" type="number | null" default={null}>
+  A `close_reasons` code. Pass `null` to tear down without notifying the client (e.g. during `ServerConnection.cleanup()`).
+</ParamField>
+
+**Returns:** `Promise<void>`
+
+#### `put_data(data)`
+
+```js
+await stream.put_data(data)
+```
+
+Enqueues a raw `Uint8Array` of data onto `send_buffer` to be forwarded to the outbound socket by the `ws_to_tcp()` task. Provides backpressure: the caller `await`s if the queue is full.
+
+<ParamField path="data" type="Uint8Array" required>
+  The raw bytes from a `DATA` packet payload.
+</ParamField>
+
+**Returns:** `Promise<void>`
+
+#### `tcp_to_ws()`
+
+```js
+// internal — started automatically by setup()
+```
+
+Reads data from the outbound socket in a loop and sends it to the client as `DATA` packets. Pauses the socket while a packet is in flight and resumes it afterwards to apply backpressure. When the socket closes (`recv()` returns `null`), sends a `CLOSE` packet with reason `Voluntary` via `conn.close_stream()`.
+
+**Returns:** `Promise<void>`
+
+#### `ws_to_tcp()`
+
+```js
+// internal — started automatically by setup()
+```
+
+Dequeues entries from `send_buffer` and writes them to the outbound socket. Every `ServerStream.buffer_size / 2` packets forwarded, it sends a `CONTINUE` packet to the client advertising the remaining buffer capacity. When `send_buffer` is closed (`get()` returns `null`), calls `close()`.
+
+**Returns:** `Promise<void>`
+
+---
+
+## `HandshakeError`
+
+```js
+class HandshakeError extends Error {}
+```
+
+Thrown by `ServerConnection.setup()` during the Wisp v2 `INFO` packet exchange when the client closes the WebSocket before the handshake completes, or sends an unexpected packet type as its first message. `routeRequest` catches this error silently and closes the WebSocket without logging an uncaught error.
+
+---
+
+## Integration Example
+
+The following shows how to create a `ServerConnection` manually from an upgraded WebSocket, bypassing `routeRequest`. This is useful when you need full control over connection creation — for example, to inject a custom socket implementation.
+
+```js
+import http from "node:http";
+import { WebSocketServer } from "ws";
+import { ServerConnection } from "@mercuryworkshop/wisp-js/server";
+
+const wss = new WebSocketServer({ noServer: true });
+
+const server = http.createServer();
+
+server.on("upgrade", (request, socket, head) => {
+  // Only accept requests to paths ending with "/"
+  if (!request.url.endsWith("/")) {
+    socket.destroy();
+    return;
+  }
+
+  wss.handleUpgrade(request, socket, head, async (ws) => {
+    ws.binaryType = "arraybuffer";
+
+    const conn = new ServerConnection(ws, request.url, {
+      ping_interval: 60,
+      wisp_version: 2,
+    });
+
+    try {
+      await conn.setup();
+      await conn.run();
+    } catch (err) {
+      // HandshakeError is silently ignored; other errors are logged
+      console.error("Connection error:", err);
+      ws.close();
+    }
+  });
+});
+
+server.listen(5001, () => {
+  console.log("Wisp server listening on http://localhost:5001");
+});
+```

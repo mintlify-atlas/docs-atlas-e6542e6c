@@ -1,0 +1,151 @@
+---
+title: "WispWebSocket: Drop-in WebSocket Polyfill"
+sidebarTitle: "WebSocket Polyfill"
+description: "Replace the browser's native WebSocket with WispWebSocket to tunnel connections through a Wisp server — with no code changes to the consuming application."
+---
+
+Many existing browser applications establish connections with `new WebSocket(url)`. Rewriting every call-site to use a Wisp-aware API is impractical. `WispWebSocket` solves this by implementing the standard `WebSocket` interface on top of a Wisp `ClientConnection`, so the consuming code keeps working without any modifications — the only change is swapping the constructor.
+
+## Importing
+
+```js
+import { WispWebSocket } from '@mercuryworkshop/wisp-js/client';
+```
+
+## URL Format
+
+`WispWebSocket` expects its first argument to be a URL in which the **last path segment** encodes the target host and port as `hostname:port`. Everything before that segment is treated as the Wisp server endpoint.
+
+```
+wss://wisp.example.com/chat.example.com:443
+└─── Wisp endpoint ──┘└─── target host:port ─┘
+```
+
+```js
+// Connects to wisp.example.com/wisp/ and opens a TCP stream to chat.example.com:443
+const ws = new WispWebSocket('wss://wisp.example.com/wisp/chat.example.com:443');
+```
+
+Internally the class splits on the last `/`, uses the left portion (re-appended with `/`) as the Wisp endpoint URL, and parses `host` and `port` from the right portion.
+
+## Shared Connections
+
+Multiple `WispWebSocket` instances that resolve to the **same Wisp endpoint URL** automatically reuse a single `ClientConnection`. The shared map is exported as `_wisp_connections`:
+
+```js
+import { WispWebSocket, _wisp_connections } from '@mercuryworkshop/wisp-js/client';
+
+const ws1 = new WispWebSocket('wss://wisp.example.com/wisp/api.example.com:443');
+const ws2 = new WispWebSocket('wss://wisp.example.com/wisp/cdn.example.com:80');
+
+// Both sockets share the same underlying ClientConnection
+console.log(_wisp_connections['wss://wisp.example.com/wisp/']); // ClientConnection
+```
+
+New `WispWebSocket` instances created while the shared connection is still in the `connecting` state chain their `init_stream` call to the existing `onopen` handler, so no streams are lost.
+
+## API Compatibility
+
+`WispWebSocket` implements the following standard [`WebSocket`](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket) surface:
+
+### Methods
+
+| Method | Description |
+|---|---|
+| `send(data)` | Transmit data over the Wisp stream. Accepts `Uint8Array`, `string`, `Blob`, `ArrayBuffer`, and any `ArrayBufferView`. Strings are UTF-8 encoded automatically. |
+| `close()` | Close the underlying stream with reason `0x02` (Voluntary). |
+
+### Event Handlers
+
+Assign callbacks directly, or use `addEventListener` (the class extends `EventTarget`):
+
+| Handler | Standard Event | Description |
+|---|---|---|
+| `onopen` | `Event('open')` | Fires when the stream is established and ready for data. |
+| `onmessage` | `MessageEvent('message')` | Fires when data arrives. The `event.data` type depends on `binaryType`. |
+| `onclose` | `CloseEvent('close')` | Fires when the stream closes. `event.code` contains the Wisp close reason. |
+| `onerror` | `Event('error')` | Fires when the underlying `ClientConnection` closes unexpectedly. |
+
+### Properties
+
+| Property | Type | Description |
+|---|---|---|
+| `readyState` | `number` | Current connection state (see constants below). |
+| `bufferedAmount` | `number` | Total byte length of messages in the stream's `send_buffer` waiting for server flow-control clearance. |
+| `binaryType` | `string` | `'blob'` (default) or `'arraybuffer'` — controls the type of `event.data` in `onmessage`. |
+| `extensions` | `string` | Always `""` (no WebSocket-level extensions are negotiated). |
+| `protocol` | `string` | Always `"binary"`. |
+| `url` | `string` | The original URL passed to the constructor. |
+
+### Ready State Constants
+
+These match the values specified by the WebSocket standard and are available as both instance properties and as static-like values:
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `CONNECTING` | `0` | The connection has not yet been established. |
+| `OPEN` | `1` | The stream is ready to send and receive data. |
+| `CLOSING` | `2` | The stream is in the process of closing. |
+| `CLOSED` | `3` | The stream has been closed or could not be opened. |
+
+## Global Replacement Pattern
+
+To proxy all `WebSocket` calls in an existing application through Wisp, reassign `window.WebSocket` before any other scripts run:
+
+```js
+import { WispWebSocket } from '@mercuryworkshop/wisp-js/client';
+
+// All subsequent `new WebSocket(url)` calls will use WispWebSocket instead.
+// The url must follow the hostname:port suffix convention.
+window.WebSocket = WispWebSocket;
+```
+
+This is typically done in an entry-point script or a service-worker `install` handler so the polyfill is in place before any application code executes.
+
+## Passing Options to the Underlying Connection
+
+The third constructor argument, `options`, is forwarded directly to `ClientConnection`. Use this to configure the Wisp protocol version or extensions:
+
+```js
+import { WispWebSocket } from '@mercuryworkshop/wisp-js/client';
+import { UDPExtension, MOTDExtension } from '@mercuryworkshop/wisp-js/client';
+
+const ws = new WispWebSocket(
+  'wss://wisp.example.com/wisp/chat.example.com:443',
+  null, // protocols (unused)
+  {
+    wisp_version: 2,
+    wisp_extensions: [
+      new UDPExtension({ client_config: {} }),
+      new MOTDExtension({ client_config: {} }),
+    ],
+  }
+);
+```
+
+When multiple `WispWebSocket` instances share the same endpoint, only the **first** instance's options are used to create the `ClientConnection`. Subsequent instances attach to the already-created connection and their `options` argument is ignored.
+
+## Binary Type Handling
+
+<Note>
+`binaryType` defaults to `'blob'`, matching the native `WebSocket` default. Set it to `'arraybuffer'` before `onopen` fires if your application expects raw `ArrayBuffer` objects in `onmessage`:
+
+```js
+const ws = new WispWebSocket('wss://wisp.example.com/wisp/api.example.com:443');
+ws.binaryType = 'arraybuffer';
+
+ws.onmessage = (event) => {
+  // event.data is an ArrayBuffer
+  const view = new Uint8Array(event.data);
+  console.log(view);
+};
+```
+
+If `binaryType` is set to any value other than `'blob'` or `'arraybuffer'`, `send()` will throw `"invalid binaryType string"`.
+</Note>
+
+## TCP Only
+
+<Warning>
+`WispWebSocket` always opens a **TCP** stream regardless of the target URL. There is no mechanism to request a UDP stream through the `WispWebSocket` polyfill — use `ClientConnection.create_stream(host, port, 'udp')` directly if you need UDP.
+</Warning>

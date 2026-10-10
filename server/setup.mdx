@@ -1,0 +1,132 @@
+---
+title: "Integrating the Wisp Server into Node.js"
+sidebarTitle: "Setup"
+description: "Add a Wisp server to an existing Node.js HTTP server using routeRequest, handle WebSocket upgrades, and serve both Wisp and WsProxy connections."
+---
+
+The Wisp server package ships as a drop-in addition to any existing Node.js HTTP server. A single function — `routeRequest` — handles the WebSocket upgrade handshake, detects whether the incoming connection is a Wisp or WsProxy request, and runs the appropriate connection handler, all without requiring you to manage WebSocket lifecycle code directly.
+
+## Basic Integration
+
+The minimal setup wires `routeRequest` into Node's built-in `http` module. Pass the `upgrade` event arguments directly to `routeRequest` and the library takes care of the rest.
+
+```js
+import http from "node:http";
+import { server as wisp } from "@mercuryworkshop/wisp-js/server";
+
+const httpServer = http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("Wisp server running");
+});
+
+httpServer.on("upgrade", (request, socket, head) => {
+  wisp.routeRequest(request, socket, head);
+});
+
+httpServer.listen(5001, () => {
+  console.log("Listening on http://localhost:5001");
+});
+```
+
+## Import Paths
+
+The server entrypoint re-exports everything you need for most use cases. You can destructure specific namespaces in a single import:
+
+```js
+import { server as wisp, logging, extensions } from "@mercuryworkshop/wisp-js/server";
+```
+
+| Export | Description |
+|---|---|
+| `server` | Core server API: `routeRequest`, `ServerConnection`, `options` |
+| `logging` | Log level control and custom log handler |
+| `extensions` | Wisp v2 extension helpers (`MOTDExtension`, `UDPExtension`, etc.) |
+
+## How `routeRequest` Works
+
+`routeRequest(request, socket, head, conn_options?)` is the primary entry point for all incoming WebSocket upgrade requests.
+
+1. **Upgrades the connection** — Uses an internal `ws.WebSocketServer` in `noServer` mode to complete the WebSocket handshake via `handleUpgrade`.
+2. **Detects the connection type** — Inspects `request.url`:
+   - Paths **ending with `/`** are treated as Wisp connections and spawn a `ServerConnection`.
+   - Paths **not ending with `/`** are treated as WsProxy connections and spawn a `WSProxyConnection`.
+3. **Negotiates Wisp version** — If the client sends the `sec-websocket-protocol` header and `options.wisp_version` is `2`, the connection is upgraded as Wisp v2; otherwise it falls back to v1.
+4. **Parses real IP** — Extracts the client IP from `X-Forwarded-For` or `X-Real-IP` headers when `options.parse_real_ip` is enabled.
+
+You can pass a `conn_options` object as the fourth argument to override per-connection settings without changing the global `options`:
+
+```js
+httpServer.on("upgrade", (request, socket, head) => {
+  wisp.routeRequest(request, socket, head, {
+    ping_interval: 60,
+    wisp_version: 1
+  });
+});
+```
+
+## Custom Socket Implementations
+
+`ServerConnection` accepts `TCPSocket` and `UDPSocket` constructor options, allowing you to substitute custom networking implementations in place of the built-in `NodeTCPSocket` and `NodeUDPSocket` classes.
+
+Each custom socket class must implement the following async interface:
+
+| Method | Description |
+|---|---|
+| `connect()` | Establish the connection |
+| `recv()` | Return the next chunk of data, or `null` when the stream ends |
+| `send(data)` | Write a chunk of data |
+| `close()` | Tear down the connection |
+| `pause()` | Apply backpressure (may be a no-op) |
+| `resume()` | Release backpressure (may be a no-op) |
+
+Pass your implementations via `conn_options`:
+
+```js
+import { ServerConnection } from "@mercuryworkshop/wisp-js/server";
+
+class MyTCPSocket {
+  constructor(hostname, port) { /* ... */ }
+  async connect() { /* ... */ }
+  async recv()    { /* ... */ }
+  async send(data){ /* ... */ }
+  async close()   { /* ... */ }
+  pause()  {}
+  resume() {}
+}
+
+httpServer.on("upgrade", (request, socket, head) => {
+  wisp.routeRequest(request, socket, head, {
+    TCPSocket: MyTCPSocket
+  });
+});
+```
+
+## Wisp Version
+
+By default the server negotiates Wisp v2 with clients that advertise support. To pin all connections to Wisp v1 (for compatibility with older clients), set `wisp_version` in the global options or per-connection:
+
+```js
+// Globally force Wisp v1
+wisp.options.wisp_version = 1;
+
+// Or per-connection
+httpServer.on("upgrade", (request, socket, head) => {
+  wisp.routeRequest(request, socket, head, { wisp_version: 1 });
+});
+```
+
+## Ping Interval
+
+The server sends WebSocket-level `ping` frames on a fixed interval to keep idle connections alive and detect dropped clients. The default interval is **30 seconds**.
+
+```js
+// Globally adjust the ping interval to 60 seconds
+wisp.options.ping_interval = 60;
+
+// Or per-connection
+httpServer.on("upgrade", (request, socket, head) => {
+  wisp.routeRequest(request, socket, head, { ping_interval: 60 });
+});
+```
+
+Set `ping_interval` to `0` or a very large number to effectively disable pings. Note that pings are only sent when the underlying WebSocket implementation exposes a `ping()` method (i.e., on Node.js with the `ws` package — browser-side WebSockets do not support pings).

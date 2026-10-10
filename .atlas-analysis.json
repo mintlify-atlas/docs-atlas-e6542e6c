@@ -1,0 +1,119 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Wisp for Plutonium",
+  "projectDescription": "A JavaScript client and server implementation of the Wisp protocol — a multiplexed WebSocket proxy that tunnels TCP and UDP streams — customized for the Plutonium Network.",
+  "theme": "luma",
+  "primaryColor": "#6366f1",
+  "lightColor": "#818cf8",
+  "darkColor": "#4338ca",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/protocol-overview",
+              "concepts/packet-types",
+              "concepts/extensions"
+            ]
+          },
+          {
+            "group": "Server Guide",
+            "pages": [
+              "server/setup",
+              "server/configuration",
+              "server/filtering",
+              "server/wsproxy"
+            ]
+          },
+          {
+            "group": "Client Guide",
+            "pages": [
+              "client/usage",
+              "client/websocket-polyfill",
+              "client/streams"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/cli",
+              "deployment/render"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Server API",
+            "pages": [
+              "api/server-connection",
+              "api/server-stream",
+              "api/route-request",
+              "api/server-options"
+            ]
+          },
+          {
+            "group": "Client API",
+            "pages": [
+              "api/client-connection",
+              "api/wisp-websocket"
+            ]
+          },
+          {
+            "group": "Packets & Extensions",
+            "pages": [
+              "api/packets",
+              "api/extensions"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Multiplexed TCP and UDP stream tunneling over a single WebSocket connection",
+    "Wisp protocol v1 and v2 support with automatic version negotiation",
+    "Built-in connection filtering — hostname/port whitelists, blacklists, IP restrictions, stream limits",
+    "WsProxy mode for raw WebSocket-to-TCP proxying without the Wisp framing",
+    "WebSocket polyfill (WispWebSocket) for drop-in use in browser applications",
+    "Pluggable extension system with UDP, MOTD, and Password Authentication extensions",
+    "Standalone CLI server with static file serving, config file support, and logging levels",
+    "Real IP parsing from X-Forwarded-For / X-Real-IP headers"
+  ],
+  "publicApiSurface": [
+    "ClientConnection",
+    "WispWebSocket",
+    "ServerConnection",
+    "ServerStream",
+    "routeRequest",
+    "parse_real_ip",
+    "options (server config object)",
+    "WispPacket",
+    "WispBuffer",
+    "ConnectPayload",
+    "DataPayload",
+    "ContinuePayload",
+    "ClosePayload",
+    "InfoPayload",
+    "UDPExtension",
+    "PasswordAuthExtension",
+    "MOTDExtension",
+    "BaseExtension",
+    "parse_extensions",
+    "serialize_extensions",
+    "wisp-js-server (CLI binary)"
+  ]
+}

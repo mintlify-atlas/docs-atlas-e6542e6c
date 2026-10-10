@@ -1,0 +1,357 @@
+---
+title: "Wisp Extension Classes API Reference"
+sidebarTitle: "Extensions"
+description: "API reference for BaseExtension, UDPExtension, PasswordAuthExtension, MOTDExtension, and the parse_extensions / serialize_extensions utility functions."
+---
+
+Wisp v2 uses an extension system to negotiate optional features — such as UDP stream support, password authentication, and server messages-of-the-day — during the INFO handshake. Each feature is represented as an extension class that carries a server payload (what the server advertises) and a client payload (what the client advertises back). The classes here are used internally by `ClientConnection` during the v2 handshake and can also be passed directly to `ServerConnection` to configure a server.
+
+```js
+import {
+  BaseExtension,
+  UDPExtension,
+  PasswordAuthExtension,
+  MOTDExtension,
+  parse_extensions,
+  serialize_extensions,
+  extensions_map,
+} from '@mercuryworkshop/wisp-js';
+```
+
+---
+
+## `BaseExtension` class
+
+The abstract base class from which all extension classes inherit. Provides the shared wire format (5-byte header: 1-byte ID + 4-byte little-endian payload length) plus default inner `Server` and `Client` payload classes.
+
+### Static properties
+
+<ResponseField name="id" type="number">
+  Extension identifier byte. `0x00` on `BaseExtension` itself; overridden by every subclass.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Human-readable extension name. `""` on `BaseExtension`.
+</ResponseField>
+
+<ResponseField name="Server" type="class">
+  Inner class for the server-side payload. Defaults to `EmptyPayload` (zero bytes). Subclasses replace this with their own parser/serializer.
+</ResponseField>
+
+<ResponseField name="Client" type="class">
+  Inner class for the client-side payload. Defaults to `EmptyPayload`. Subclasses replace this with their own parser/serializer.
+</ResponseField>
+
+### Constructor
+
+```js
+new BaseExtension({ server_config?, client_config? })
+```
+
+Instantiates an extension and populates `this.payload` from whichever config was provided.
+
+<ParamField path="server_config" type="object">
+  Configuration passed to `new this.constructor.Server(server_config)`. Provide this when creating extensions for a server.
+</ParamField>
+
+<ParamField path="client_config" type="object">
+  Configuration passed to `new this.constructor.Client(client_config)`. Provide this when creating extensions for a client.
+</ParamField>
+
+Exactly one of `server_config` or `client_config` should be supplied. The resulting payload is stored as `this.payload`. `this.id` and `this.name` are copied from the static class properties.
+
+### Instance properties
+
+<ResponseField name="id" type="number">
+  The extension's numeric ID, copied from `this.constructor.id`.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  The extension's name, copied from `this.constructor.name`.
+</ResponseField>
+
+<ResponseField name="payload" type="object">
+  The parsed or constructed payload for this extension — an instance of either the `Server` or `Client` inner class.
+</ResponseField>
+
+### Static methods
+
+#### `BaseExtension.parse(ext_class, buffer, role)`
+
+Parses an extension from raw bytes. Skips the 5-byte header and delegates to the appropriate inner class parser depending on `role`.
+
+<ParamField path="ext_class" type="class" required>
+  The extension class to parse (e.g. `UDPExtension`, `MOTDExtension`).
+</ParamField>
+
+<ParamField path="buffer" type="WispBuffer" required>
+  A `WispBuffer` beginning at offset 0 of the full serialized extension (including the 5-byte header). The inner-class `parse` receives `buffer.slice(5)`.
+</ParamField>
+
+<ParamField path="role" type="string" required>
+  `'server'` to parse the server payload, or `'client'` to parse the client payload. Any other value throws a `TypeError`.
+</ParamField>
+
+**Returns** an instance of `ext_class` with `payload` set.
+
+### Instance methods
+
+#### `serialize()`
+
+Serializes the extension to a `WispBuffer` containing the 5-byte header followed by the payload bytes.
+
+- Byte 0: `this.constructor.id` (signed 8-bit integer).
+- Bytes 1–4: payload size as a 32-bit unsigned little-endian integer.
+- Bytes 5+: `this.payload.serialize()`.
+
+**Returns** `WispBuffer`.
+
+---
+
+## `UDPExtension`
+
+Signals that the party supports UDP streams. Both the server and client payloads are empty (zero bytes) — the presence of this extension in the INFO exchange is sufficient to enable UDP.
+
+| Static | Value |
+|---|---|
+| `id` | `0x01` |
+| `name` | `"UDP"` |
+| `Server` | `EmptyPayload` |
+| `Client` | `EmptyPayload` |
+
+### Usage
+
+```js
+// Client side (added automatically by ClientConnection when wisp_version === 2)
+new UDPExtension({ client_config: {} })
+
+// Server side
+new UDPExtension({ server_config: {} })
+```
+
+When `ClientConnection` receives an INFO packet containing this extension from the server, it sets `udp_enabled = true` (it already defaults to `true`, and is set to `false` only when the extension is absent).
+
+---
+
+## `PasswordAuthExtension`
+
+Enables password-based authentication. The server advertises whether credentials are required; the client sends a username/password pair.
+
+| Static | Value |
+|---|---|
+| `id` | `0x02` |
+| `name` | `"Password Authentication"` |
+
+### `PasswordAuthExtension.Server` inner class
+
+Configured with `server_config` and used when creating a server-side extension instance.
+
+#### Constructor
+
+```js
+new PasswordAuthExtension.Server({ required })
+```
+
+<ParamField path="required" type="number" default={1}>
+  `1` if the server requires credentials, `0` if authentication is optional. Serialized as a single byte.
+</ParamField>
+
+#### `PasswordAuthExtension.Server.parse(buffer)`
+
+Reads `required` from byte 0.
+
+**Returns** an instance of `PasswordAuthExtension.Server`.
+
+#### `serialize()`
+
+Returns a 1-byte `WispBuffer`.
+
+---
+
+### `PasswordAuthExtension.Client` inner class
+
+Configured with `client_config` and used when creating a client-side extension instance.
+
+#### Constructor
+
+```js
+new PasswordAuthExtension.Client({ username, password })
+```
+
+<ParamField path="username" type="string" required>
+  Username string. The serialized length is stored as a 1-byte unsigned integer (max 255 bytes after UTF-8 encoding).
+</ParamField>
+
+<ParamField path="password" type="string" required>
+  Password string. The serialized length is stored as a 2-byte unsigned little-endian integer (max 65535 bytes after UTF-8 encoding).
+</ParamField>
+
+#### Wire format
+
+`[1-byte username_len][2-byte password_len][username bytes][password bytes]`
+
+#### `PasswordAuthExtension.Client.parse(buffer)`
+
+Reads `username_len` from byte 0, `password_len` from bytes 1–2 (little-endian), then decodes the username and password strings.
+
+**Returns** an instance of `PasswordAuthExtension.Client`.
+
+#### `serialize()`
+
+Returns a `WispBuffer` of `3 + username.length + password.length` bytes.
+
+---
+
+### Usage
+
+```js
+// Server: require authentication
+const authExt = new PasswordAuthExtension({ server_config: { required: 1 } });
+
+// Client: provide credentials
+const authExt = new PasswordAuthExtension({
+  client_config: { username: 'alice', password: 's3cr3t' }
+});
+```
+
+---
+
+## `MOTDExtension`
+
+Allows the server to send a message-of-the-day string to connecting clients. The client payload is empty.
+
+| Static | Value |
+|---|---|
+| `id` | `0x04` |
+| `name` | `"Server MOTD"` |
+| `Client` | `EmptyPayload` |
+
+### `MOTDExtension.Server` inner class
+
+#### Constructor
+
+```js
+new MOTDExtension.Server({ message })
+```
+
+<ParamField path="message" type="string" required>
+  The MOTD string to broadcast. Serialized as raw UTF-8 bytes with no length prefix — the extension length field in the 5-byte header encodes its size.
+</ParamField>
+
+#### `MOTDExtension.Server.parse(buffer)`
+
+Decodes the entire buffer as UTF-8.
+
+**Returns** an instance of `MOTDExtension.Server`.
+
+#### `serialize()`
+
+Returns a `WispBuffer` of `message.length` bytes (UTF-8 encoded).
+
+---
+
+### Usage
+
+```js
+// Server: advertise an MOTD
+const motdExt = new MOTDExtension({ server_config: { message: 'Welcome to Wisp!' } });
+
+// Client: declare interest (no config needed — EmptyPayload)
+const motdExt = new MOTDExtension({ client_config: {} });
+// ClientConnection adds this automatically when wisp_version === 2
+```
+
+After a successful v2 handshake, `ClientConnection` exposes the server's MOTD as:
+
+```js
+connection.server_motd // "Welcome to Wisp!" or null
+```
+
+---
+
+## `parse_extensions(payload_buffer, valid_extensions, role)`
+
+Iterates over the concatenated extension bytes in an INFO packet payload, matches each extension by ID against the `valid_extensions` list, and returns the successfully parsed extensions.
+
+<ParamField path="payload_buffer" type="WispBuffer" required>
+  The raw extension bytes from an `InfoPayload.extensions` buffer — a sequence of serialized extensions, each with its own 5-byte header.
+</ParamField>
+
+<ParamField path="valid_extensions" type="Array" required>
+  An array of already-constructed extension instances whose `id` properties are used to match against the incoming extension IDs. Typically `connection.wisp_extensions`.
+</ParamField>
+
+<ParamField path="role" type="string" required>
+  `'server'` to parse each extension's `Server` payload, `'client'` to parse each extension's `Client` payload.
+</ParamField>
+
+**Returns** an `Array` of parsed extension instances for every extension that was present in `payload_buffer` and had a matching entry in `valid_extensions`. Unknown extensions are silently skipped.
+
+---
+
+## `serialize_extensions(extensions)`
+
+Concatenates the serialized form of every extension in the array into a single `WispBuffer` suitable for embedding in an `InfoPayload`.
+
+<ParamField path="extensions" type="Array" required>
+  Array of extension instances to serialize. Each must implement `serialize()`.
+</ParamField>
+
+**Returns** a `WispBuffer` containing all extensions packed end-to-end (each prefixed by its 5-byte header).
+
+---
+
+## `extensions_map`
+
+A convenience map from extension ID to extension class.
+
+```js
+{
+  0x01: UDPExtension,
+  0x02: PasswordAuthExtension,
+  0x04: MOTDExtension,
+}
+```
+
+Use this to look up an extension class by its wire ID without importing each class individually.
+
+---
+
+## Example: configuring extensions for a server
+
+The following example shows how to create extension instances and pass them to a `ServerConnection` (or any custom connection handler) during the v2 INFO handshake:
+
+```js
+import {
+  UDPExtension,
+  PasswordAuthExtension,
+  MOTDExtension,
+  serialize_extensions,
+} from '@mercuryworkshop/wisp-js';
+import { WispBuffer, WispPacket, InfoPayload, packet_types } from '@mercuryworkshop/wisp-js';
+
+// Build the server-side extension list
+const serverExtensions = [
+  new UDPExtension({ server_config: {} }),
+  new PasswordAuthExtension({ server_config: { required: 1 } }),
+  new MOTDExtension({ server_config: { message: 'Hello, Wisp client!' } }),
+];
+
+// Serialize all extensions into a single buffer
+const extBuffer = serialize_extensions(serverExtensions);
+
+// Embed in an INFO packet on stream 0
+const infoPacket = new WispPacket({
+  type: packet_types.INFO,
+  stream_id: 0,
+  payload: new InfoPayload({
+    major_ver: 2,
+    minor_ver: 0,
+    extensions: extBuffer,
+  }),
+});
+
+ws.send(infoPacket.serialize().bytes);
+```
+
+On the receiving client, `ClientConnection` automatically calls `parse_extensions` on the INFO payload using its own `wisp_extensions` list as the allowed set, then populates `connection.server_exts` and `connection.client_exts` with the matched pairs.

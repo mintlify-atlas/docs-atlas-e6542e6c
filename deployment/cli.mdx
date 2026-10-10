@@ -1,0 +1,207 @@
+---
+title: "Running wisp-js-server from the CLI"
+sidebarTitle: "CLI Server"
+description: "Start a standalone Wisp server with wisp-js-server — configure host, port, logging level, static file serving, and server options from the command line."
+---
+
+`@mercuryworkshop/wisp-js` ships with a ready-to-run standalone server binary called `wisp-js-server`. It wraps the Wisp server implementation in a Node.js HTTP server that handles WebSocket upgrades, optional static file serving, and JSON-based server configuration — all wired up from command-line flags with no extra code required.
+
+## Installation & Invocation
+
+If you have the package installed globally or are using `npx`, launch the server directly:
+
+```bash
+npx wisp-js-server
+```
+
+If you have cloned the repository locally and installed dependencies with `npm install`, use the bundled npm script instead:
+
+```bash
+npm run server_cli
+```
+
+Both commands execute `src/bin/server_cli.mjs` and accept the same flags described below.
+
+---
+
+## CLI Flags
+
+<ParamField query="-H, --host" type="string" default="127.0.0.1">
+  The hostname or IP address the HTTP server will bind to. Use `0.0.0.0` to
+  listen on all network interfaces (required for most cloud deployments).
+
+  ```bash
+  wisp-js-server -H 0.0.0.0
+  ```
+</ParamField>
+
+<ParamField query="-P, --port" type="number" default="5001">
+  The port number the server will listen on. Defaults to the `PORT` environment
+  variable when set, falling back to `5001`. Cloud platforms such as Render
+  inject `$PORT` automatically — the server reads it without any extra
+  configuration.
+
+  ```bash
+  wisp-js-server -P 8080
+  ```
+</ParamField>
+
+<ParamField query="-L, --logging" type="string" default="INFO">
+  Controls the verbosity of server log output. Accepted values (case-insensitive):
+  `DEBUG`, `INFO`, `WARN`, `ERROR`, `NONE`. Passing an unrecognised value causes
+  the process to exit with an error.
+
+  ```bash
+  wisp-js-server -L DEBUG
+  ```
+</ParamField>
+
+<ParamField query="-S, --static" type="string">
+  Path to a directory that the HTTP server should serve as static files.
+  When this flag is set, incoming HTTP requests are resolved against the
+  directory (with `index.html` as the directory default). When omitted, all
+  HTTP requests return the Plutonium Network license/info page instead.
+  WebSocket upgrade requests are always routed to the Wisp handler regardless
+  of this flag.
+
+  ```bash
+  wisp-js-server -S ./public
+  ```
+</ParamField>
+
+<ParamField query="-C, --config" type="string">
+  Path to a JSON file containing Wisp server options. Keys in the file are
+  applied directly to `wisp.options` — the same object exposed by the
+  JavaScript API. Relative paths are resolved from the current working
+  directory.
+
+  ```bash
+  wisp-js-server -C ./wisp-config.json
+  ```
+</ParamField>
+
+<ParamField query="-O, --options" type="string">
+  An inline JSON string of Wisp server options. Applied to `wisp.options` in
+  the same way as `--config`, but without requiring a separate file. Useful for
+  quick overrides or container environments that pass configuration through
+  environment variables.
+
+  ```bash
+  wisp-js-server -O '{"allow_udp_streams":false}'
+  ```
+</ParamField>
+
+<ParamField query="--version" type="boolean">
+  Prints the current package version and exits.
+
+  ```bash
+  wisp-js-server --version
+  # 1.1.3
+  ```
+</ParamField>
+
+---
+
+## Config File Example
+
+Create a JSON file (e.g. `wisp-config.json`) whose keys mirror the properties of `wisp.options`:
+
+```json wisp-config.json
+{
+  "allow_udp_streams": false,
+  "max_open_streams": 64,
+  "stream_limit_per_host": 8
+}
+```
+
+Then pass it to the server:
+
+```bash
+wisp-js-server -C ./wisp-config.json
+```
+
+The file is read once at startup. All keys are merged into `wisp.options` before the HTTP server begins listening.
+
+---
+
+## Inline Options Example
+
+For one-off overrides — or when running inside a container where mounting a config file is inconvenient — use `-O` with an escaped JSON string:
+
+```bash
+wisp-js-server -H 0.0.0.0 -P 443 -O '{"allow_udp_streams":false,"max_open_streams":128}'
+```
+
+`-O` and `-C` can be combined. Both are applied in order (`-C` first, then `-O`), so `-O` values take precedence over the file.
+
+---
+
+## Static File Serving
+
+When `--static <dir>` is provided, the server resolves every incoming HTTP request path relative to that directory:
+
+- If the resolved path is a directory, `index.html` inside it is served.
+- Unknown file extensions are served as `application/octet-stream`.
+- Missing files return `404 not found`; other read errors return `500 internal server error`.
+
+```bash
+wisp-js-server -H 0.0.0.0 -P 5001 -S ./dist
+```
+
+When `--static` is **not** set, every plain HTTP request returns a `200 text/plain` response containing the Plutonium Network license information and a short status message, for example:
+
+```
+Plutonium Network's Wisp v1.1.3 is online and serving the us-east region.
+```
+
+WebSocket upgrade requests are always handled by the Wisp protocol layer — they are never affected by static file settings.
+
+---
+
+## Environment Variables
+
+| Variable   | Effect                                                                                                           |
+| ---------- | ---------------------------------------------------------------------------------------------------------------- |
+| `PORT`     | Sets the default port used when `-P` is not supplied. Cloud platforms typically inject this automatically.       |
+| `LOCATION` | When set, its value is interpolated into the HTTP status message: `"…is online and serving the <LOCATION> region."` Useful for multi-region deployments where you want each node to self-identify. |
+
+```bash
+LOCATION="eu-west" wisp-js-server -H 0.0.0.0
+```
+
+---
+
+## Logging Levels
+
+The `-L` / `--logging` flag accepts one of five levels. The value is normalised to uppercase before comparison, so `-L debug` and `-L DEBUG` are equivalent.
+
+| Level   | Description                                                                                     |
+| ------- | ----------------------------------------------------------------------------------------------- |
+| `DEBUG` | Verbose output — logs every internal event. Use during development to trace connection issues.  |
+| `INFO`  | **Default.** Logs server startup, each incoming HTTP request, and Wisp stream lifecycle events. |
+| `WARN`  | Logs recoverable unexpected conditions. Suppresses routine informational messages.              |
+| `ERROR` | Logs only fatal or unrecoverable errors.                                                        |
+| `NONE`  | Completely silent — no output to stdout or stderr from the logger.                              |
+
+---
+
+## Example Server Startup Output
+
+```console
+$ wisp-js-server -H 0.0.0.0 -P 5001 -L INFO -S ./public
+
+info  Serving static files from: /home/user/project/public
+info  HTTP server listening on 0.0.0.0:5001
+info  HTTP GET / from 192.168.1.42
+info  HTTP GET /favicon.ico from 192.168.1.42
+```
+
+With `LOCATION` set:
+
+```console
+$ LOCATION="us-east" wisp-js-server -H 0.0.0.0 -P 5001
+
+info  HTTP server listening on 0.0.0.0:5001
+info  HTTP GET / from 203.0.113.7
+# → responds: "Plutonium Network's Wisp v1.1.3 is online and serving the us-east region."
+```

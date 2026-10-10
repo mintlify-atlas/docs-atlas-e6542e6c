@@ -1,0 +1,190 @@
+---
+title: "routeRequest and parse_real_ip Functions"
+sidebarTitle: "routeRequest"
+description: "API reference for routeRequest and parse_real_ip — the server-side helpers that handle WebSocket upgrade requests and extract the real client IP from proxy headers."
+---
+
+`routeRequest` and `parse_real_ip` are the two top-level server helper functions. `routeRequest` is the single entry point for all incoming WebSocket upgrade requests — it upgrades the connection, inspects the URL path, and dispatches to either `ServerConnection` (full Wisp multiplexing) or `WSProxyConnection` (single-stream TCP proxy). `parse_real_ip` is used internally by `routeRequest` to extract the real client address from reverse-proxy headers, but it can also be called directly when you need that information elsewhere.
+
+## Import
+
+```js
+import { server } from "@mercuryworkshop/wisp-js/server";
+
+// routeRequest and parse_real_ip are both on the server namespace
+server.routeRequest(request, socket, head);
+server.parse_real_ip(headers, client_ip);
+```
+
+Or with named imports from the inner module:
+
+```js
+import { routeRequest, parse_real_ip } from "@mercuryworkshop/wisp-js/server";
+```
+
+---
+
+## `routeRequest(request, socket, head, conn_options)`
+
+The primary entry point for all incoming WebSocket upgrade traffic. Wire it into Node's `'upgrade'` event and the library handles the rest.
+
+```js
+routeRequest(request, socket, head, conn_options = {})
+```
+
+### What It Does
+
+1. **Negotiates Wisp version** — If the HTTP upgrade request includes a `sec-websocket-protocol` header and `options.wisp_version` is `2`, the connection is assigned `wisp_version: 2`; otherwise it falls back to `1`. This value is written into `conn_options` before the connection object is constructed.
+2. **Upgrades the WebSocket** — Calls `ws_server.handleUpgrade(request, socket, head, callback)` using an internal `ws.WebSocketServer` in `noServer` mode.
+3. **Parses the real client IP** — Calls `parse_real_ip()` to resolve the actual client address from proxy headers (see below).
+4. **Dispatches to the correct handler**:
+   - Paths **ending with `/`** create a `ServerConnection`, call `setup()` then `run()`.
+   - Paths **not ending with `/`** create a `WSProxyConnection` and call `setup()`.
+5. **Catches errors silently** — `HandshakeError` and `AccessDeniedError` are swallowed. Any other uncaught error is logged at `error` level and the WebSocket is closed.
+
+<Note>
+  `routeRequest` requires Node.js. Calling it in a browser environment throws immediately because the internal `WebSocketServer` cannot be constructed there.
+</Note>
+
+### Parameters
+
+<ParamField path="request" type="http.IncomingMessage" required>
+  The Node.js HTTP `IncomingMessage` from the `'upgrade'` event. Used to extract the URL path, client IP, origin header, and WebSocket protocol headers.
+</ParamField>
+
+<ParamField path="socket" type="net.Socket" required>
+  The raw TCP socket from the `'upgrade'` event. Passed directly to `ws_server.handleUpgrade`.
+</ParamField>
+
+<ParamField path="head" type="Buffer" required>
+  The first packet of the upgraded stream from the `'upgrade'` event. Passed directly to `ws_server.handleUpgrade`.
+</ParamField>
+
+<ParamField path="conn_options" type="object" default={{}}>
+  Optional per-connection overrides forwarded to `ServerConnection`. `wisp_version` is always set by `routeRequest` itself based on header negotiation before the object reaches the constructor.
+
+  <Expandable title="conn_options fields">
+    <ParamField path="wisp_version" type="1 | 2">
+      Set automatically by `routeRequest` based on header negotiation. You can force a specific version by passing it here, but it will be overwritten by the negotiation logic unless you modify the source.
+    </ParamField>
+
+    <ParamField path="TCPSocket" type="class">
+      Custom TCP socket class. See [`ServerConnection`](/api/server-connection) for the required interface.
+    </ParamField>
+
+    <ParamField path="UDPSocket" type="class">
+      Custom UDP socket class. See [`ServerConnection`](/api/server-connection) for the required interface.
+    </ParamField>
+
+    <ParamField path="ping_interval" type="number">
+      WebSocket ping interval in seconds. Defaults to `30`.
+    </ParamField>
+
+    <ParamField path="wisp_extensions" type="WispExtension[]">
+      Explicit Wisp v2 extension list. When omitted, the list is built from the global `options` automatically.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+**Returns:** `void` — the connection runs asynchronously in the background.
+
+### Canonical Usage
+
+```js
+import http from "node:http";
+import { server as wisp } from "@mercuryworkshop/wisp-js/server";
+
+const httpServer = http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("Wisp server running");
+});
+
+httpServer.on("upgrade", (request, socket, head) => {
+  wisp.routeRequest(request, socket, head);
+});
+
+httpServer.listen(5001, () => {
+  console.log("Listening on http://localhost:5001");
+});
+```
+
+### Per-Connection Options Override
+
+Pass a `conn_options` object as the fourth argument to override settings for individual connections without touching the global `wisp.options`:
+
+```js
+httpServer.on("upgrade", (request, socket, head) => {
+  wisp.routeRequest(request, socket, head, {
+    ping_interval: 60,
+    wisp_extensions: [], // disable all v2 extensions for this connection
+  });
+});
+```
+
+### Error Handling in `routeRequest`
+
+`routeRequest` wraps the `create_connection` async function in a `try/catch`:
+
+| Error type | Behaviour |
+|---|---|
+| `HandshakeError` | Caught silently. WebSocket is closed. No log entry. |
+| `AccessDeniedError` | Caught silently. WebSocket is closed. No log entry. |
+| Any other `Error` | Logged at `error` level as an uncaught server error. WebSocket is closed. |
+
+---
+
+## `parse_real_ip(headers, client_ip)`
+
+Reads the real client IP address from reverse-proxy forwarding headers when the connection comes from a trusted proxy.
+
+```js
+const ip = parse_real_ip(headers, client_ip)
+```
+
+### Logic
+
+1. If `options.parse_real_ip` is `false`, returns `client_ip` unchanged.
+2. If `client_ip` is **not** in `options.parse_real_ip_from`, returns `client_ip` unchanged.
+3. If the `x-forwarded-for` header is present, returns its **first** comma-separated value (trimmed).
+4. Else if the `x-real-ip` header is present, returns its value directly.
+5. Otherwise returns `client_ip` unchanged.
+
+### Parameters
+
+<ParamField path="headers" type="object" required>
+  The HTTP request headers object (e.g. `request.headers` from the `'upgrade'` event). Keys must be lowercase, as Node.js normalises them.
+</ParamField>
+
+<ParamField path="client_ip" type="string" required>
+  The raw remote address of the TCP connection (e.g. `request.socket.address().address`). Used as the fallback return value and checked against `options.parse_real_ip_from` before any header is read.
+</ParamField>
+
+**Returns:** `string` — the resolved real IP address, or `client_ip` if no forwarding header was found or the option is disabled.
+
+### Example: Reverse Proxy Setup
+
+When your Wisp server sits behind nginx or another reverse proxy, the real client address is passed via `X-Forwarded-For`. Configure `parse_real_ip_from` to include the proxy's IP so the library knows to trust the header:
+
+```js
+import { server as wisp } from "@mercuryworkshop/wisp-js/server";
+
+// Trust the X-Forwarded-For header only when the connection comes
+// from the local nginx instance
+wisp.options.parse_real_ip = true;
+wisp.options.parse_real_ip_from = ["127.0.0.1", "::1"];
+```
+
+With this configuration, a request arriving from `127.0.0.1` with header `X-Forwarded-For: 203.0.113.42` will be logged and filtered as coming from `203.0.113.42`.
+
+You can also call `parse_real_ip` directly if you need the resolved address outside of `routeRequest`:
+
+```js
+import { server as wisp } from "@mercuryworkshop/wisp-js/server";
+
+httpServer.on("upgrade", (request, socket, head) => {
+  const client_ip = request.socket.address().address;
+  const real_ip = wisp.parse_real_ip(request.headers, client_ip);
+  console.log("Upgrade from:", real_ip);
+  wisp.routeRequest(request, socket, head);
+});
+```

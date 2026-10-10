@@ -1,0 +1,264 @@
+---
+title: "Wisp v2 Extension System"
+sidebarTitle: "Extensions"
+description: "How Wisp v2 extensions work — including the built-in UDP, MOTD, and Password Authentication extensions — and how to build a custom extension."
+---
+
+Extensions let the server and client advertise optional capabilities during the Wisp v2 INFO handshake. Each side serializes the extensions it supports into its INFO packet; after the exchange, only the extensions present in **both** INFO packets are activated. Extensions that appear only on one side are silently ignored, so neither party needs to know about every extension the other supports.
+
+---
+
+## Built-in Extensions
+
+### UDPExtension — `id = 0x01`
+
+Signals that the server permits UDP streams (`stream_type = 0x02` in CONNECT packets). Without this extension, clients must assume UDP is unavailable and `ClientConnection.udp_enabled` will be `false`.
+
+Both the server config and client config payloads are **empty** — the extension acts as a pure capability flag with no accompanying data.
+
+```js
+import { UDPExtension } from "@mercuryworkshop/wisp-js/extensions";
+
+// Server side
+const udpExt = new UDPExtension({ server_config: {} });
+
+// Client side
+const udpExt = new UDPExtension({ client_config: {} });
+```
+
+After a successful v2 handshake, `ClientConnection.udp_enabled` reflects whether the server advertised this extension:
+
+```js
+const conn = new ClientConnection("wss://example.com/wisp/");
+conn.onopen = () => {
+  console.log("UDP enabled:", conn.udp_enabled); // true if UDPExtension was negotiated
+};
+```
+
+---
+
+### PasswordAuthExtension — `id = 0x02`
+
+Requires the client to supply credentials before the session is accepted. The server's INFO payload carries a `required` flag; the client's INFO payload carries a `username` and `password`.
+
+**Server payload fields:**
+
+<ParamField body="required" type="uint8" required>
+  `1` if authentication is mandatory; `0` if it is optional. Serialized as a single byte.
+</ParamField>
+
+**Client payload fields:**
+
+<ParamField body="username" type="string" required>
+  The username. Its byte length is stored in a 1-byte prefix before the string bytes.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  The password. Its byte length is stored in a 2-byte little-endian prefix before the string bytes.
+</ParamField>
+
+**Binary layout of the client payload:**
+
+```
+[username_len: 1] [password_len: 2 LE] [username: username_len bytes] [password: password_len bytes]
+```
+
+**Related close reasons** (returned in a CLOSE packet on stream 0 if authentication fails):
+
+| Code | Name | Meaning |
+|------|------|---------|
+| `0xc0` | `AuthBadPassword` | Credentials were provided but the password is wrong. |
+| `0xc1` | `AuthBadSignature` | The credential signature could not be verified. |
+| `0xc2` | `AuthMissingCredentials` | The server required credentials but none were sent. |
+
+```js
+import { PasswordAuthExtension } from "@mercuryworkshop/wisp-js/extensions";
+
+// Server — require authentication
+const authExt = new PasswordAuthExtension({ server_config: { required: 1 } });
+
+// Client — supply credentials
+const authExt = new PasswordAuthExtension({
+  client_config: { username: "alice", password: "s3cr3t" }
+});
+```
+
+---
+
+### MOTDExtension — `id = 0x04`
+
+Allows the server to deliver a Message of the Day (MOTD) string to the client during the handshake. The server's INFO payload is a raw UTF-8 string; the client's INFO payload is **empty**.
+
+**Server payload fields:**
+
+<ParamField body="message" type="string" required>
+  The MOTD text encoded as UTF-8. The entire extension payload (after the 5-byte extension header) is the message — no length prefix is used.
+</ParamField>
+
+After a successful v2 handshake, the MOTD is available on the client connection:
+
+```js
+import { MOTDExtension } from "@mercuryworkshop/wisp-js/extensions";
+
+// Server
+const motdExt = new MOTDExtension({
+  server_config: { message: "Welcome to Plutonium Network!" }
+});
+
+// Client — no config needed; the message arrives via server_exts
+const conn = new ClientConnection("wss://example.com/wisp/");
+conn.onopen = () => {
+  console.log("Server MOTD:", conn.server_motd);
+  // "Welcome to Plutonium Network!"
+};
+```
+
+The client sets `conn.server_motd` automatically:
+
+```js
+this.server_motd = this.server_exts[MOTDExtension.id]?.payload?.message;
+```
+
+---
+
+## Extension Negotiation
+
+Extension negotiation is driven by two helpers in `extensions.mjs`:
+
+### `serialize_extensions(extensions)`
+
+Takes an array of extension instances (each with a populated `payload`) and returns a single `WispBuffer` containing all extensions concatenated in their wire format. This buffer is embedded directly in the INFO packet's `extensions` field.
+
+```
+for each extension:
+  [ext_id: 1] [payload_len: 4 LE] [ext_payload: payload_len bytes]
+```
+
+### `parse_extensions(payload_buffer, valid_extensions, role)`
+
+Walks the raw `extensions` buffer from an INFO packet and constructs extension instances for every recognized extension ID. Unrecognized IDs are silently skipped.
+
+- `valid_extensions` — the local list of supported extensions used as a lookup table.
+- `role` — `"server"` or `"client"`, selects which inner class (`Server` or `Client`) is used to parse each extension's payload.
+
+### How `server_exts` / `client_exts` are built
+
+After both INFO packets have been exchanged, the implementation computes the intersection of the two sides' extension lists and stores it in two maps keyed by extension ID:
+
+```js
+// On the server (ServerConnection.setup_wisp_v2):
+let client_extensions = parse_extensions(
+  packet.payload.extensions,
+  this.wisp_extensions,  // server's supported list
+  "client"
+);
+for (let client_ext of client_extensions) {
+  for (let server_ext of this.wisp_extensions) {
+    if (server_ext.id === client_ext.id) {
+      this.server_exts[server_ext.id] = server_ext; // server's config
+      this.client_exts[client_ext.id] = client_ext; // client's config
+    }
+  }
+}
+```
+
+The same pattern runs on the client side (`ClientConnection.on_ws_msg`) when it receives the server's INFO. Only extensions that appear in **both** maps are considered active.
+
+---
+
+## Custom Extensions
+
+To implement a custom extension, extend `BaseExtension` and define:
+
+- A static `id` (must be unique and not conflict with built-ins: `0x01`, `0x02`, `0x04`).
+- A static `name` string.
+- A static `Server` inner class with `parse(buffer)` and `serialize()` methods.
+- A static `Client` inner class with `parse(buffer)` and `serialize()` methods.
+
+```js
+import { BaseExtension } from "@mercuryworkshop/wisp-js/extensions";
+import { WispBuffer } from "@mercuryworkshop/wisp-js/packet";
+
+export class RateLimitExtension extends BaseExtension {
+  static id   = 0x10; // custom ID outside the reserved range
+  static name = "Rate Limit";
+
+  // Server payload: max_requests_per_second (uint16 LE)
+  static Server = class {
+    constructor({ max_rps = 100 }) {
+      this.max_rps = max_rps;
+    }
+    static parse(buffer) {
+      return new RateLimitExtension.Server({
+        max_rps: buffer.view.getUint16(0, true)
+      });
+    }
+    serialize() {
+      const buf = new WispBuffer(2);
+      buf.view.setUint16(0, this.max_rps, true);
+      return buf;
+    }
+  };
+
+  // Client payload: empty (acknowledgement only)
+  static Client = class {
+    constructor() {}
+    static parse() { return new RateLimitExtension.Client(); }
+    serialize() { return new WispBuffer(0); }
+  };
+}
+
+// Usage on the server
+const rateLimitExt = new RateLimitExtension({ server_config: { max_rps: 50 } });
+
+// Usage on the client
+const rateLimitExt = new RateLimitExtension({ client_config: {} });
+```
+
+The `BaseExtension.parse(ext_class, ext_payload_buffer, role)` static method handles the dispatch — it instantiates the extension and calls `ext_class.Client.parse(buffer.slice(5))` or `ext_class.Server.parse(buffer.slice(5))` depending on the `role` argument. Your `parse` implementations receive the payload bytes starting at offset 5 (after the 5-byte extension header has already been consumed).
+
+---
+
+## Enabling Extensions on the Server
+
+Pass a `wisp_extensions` array to the `ServerConnection` constructor to fully control which extensions are offered:
+
+```js
+import { ServerConnection } from "@mercuryworkshop/wisp-js/server";
+import { UDPExtension, MOTDExtension, PasswordAuthExtension } from "@mercuryworkshop/wisp-js/extensions";
+
+// Explicit extension list
+const conn = new ServerConnection(ws, path, {
+  wisp_version: 2,
+  wisp_extensions: [
+    new UDPExtension({ server_config: {} }),
+    new MOTDExtension({ server_config: { message: "Hello from Plutonium!" } }),
+    new PasswordAuthExtension({ server_config: { required: 1 } }),
+  ]
+});
+await conn.setup();
+conn.run();
+```
+
+If `wisp_extensions` is `null` (the default) and `wisp_version` is `2`, `ServerConnection` calls `add_extensions()` automatically, which reads from the global `options` object:
+
+```js
+add_extensions() {
+  this.wisp_extensions = [];
+  if (options.allow_udp_streams)
+    this.wisp_extensions.push(new UDPExtension({ server_config: {} }));
+  if (options.wisp_motd)
+    this.wisp_extensions.push(new MOTDExtension({ server_config: {
+      message: options.wisp_motd
+    }}));
+}
+```
+
+To disable all extensions explicitly, pass an empty array:
+
+```js
+const conn = new ServerConnection(ws, path, {
+  wisp_version: 2,
+  wisp_extensions: [] // no extensions offered
+});
+```

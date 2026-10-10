@@ -1,0 +1,466 @@
+---
+title: "Wisp Packet Classes and Binary Serialization"
+sidebarTitle: "Packets"
+description: "API reference for WispPacket, WispBuffer, and all payload classes — CONNECT, DATA, CONTINUE, CLOSE, INFO — including parse and serialize methods."
+---
+
+The classes in this module handle all binary serialization and deserialization for the Wisp protocol. They are used internally by `ClientConnection` and `ServerConnection`; they are also exported for use in custom protocol implementations or tooling that needs to read or write raw Wisp frames.
+
+```js
+import {
+  WispBuffer,
+  WispPacket,
+  ConnectPayload,
+  DataPayload,
+  ContinuePayload,
+  ClosePayload,
+  InfoPayload,
+  packet_classes,
+  packet_types,
+  stream_types,
+  close_reasons,
+} from '@mercuryworkshop/wisp-js';
+```
+
+---
+
+## `WispBuffer` class
+
+A lightweight wrapper around `Uint8Array` that provides a co-located `DataView` and convenience helpers for slicing, concatenating, and UTF-8 decoding. All packet parsing and serialization methods accept and return `WispBuffer` instances.
+
+### Constructor
+
+```js
+new WispBuffer(data)
+```
+
+<ParamField path="data" type="Uint8Array | number | string" required>
+  - **`Uint8Array`** — wraps the array directly.
+  - **`number`** — allocates a zeroed buffer of that many bytes.
+  - **`string`** — UTF-8 encodes the string via `TextEncoder`.
+
+  Any other type throws `"invalid data type passed to wisp buffer constructor"`.
+</ParamField>
+
+### Properties
+
+<ResponseField name="size" type="number">
+  The byte length of the buffer.
+</ResponseField>
+
+<ResponseField name="bytes" type="Uint8Array">
+  The raw byte array. Pass `buffer.bytes` wherever a `Uint8Array` is required (e.g. `WebSocket.send(packet.serialize().bytes)`).
+</ResponseField>
+
+<ResponseField name="view" type="DataView">
+  A `DataView` over the same underlying `ArrayBuffer` as `bytes`. Used internally for reading and writing multi-byte integers. Byte-order is always **little-endian** in Wisp.
+</ResponseField>
+
+### Methods
+
+#### `concat(buffer)`
+
+Returns a new `WispBuffer` containing the bytes of this buffer followed by the bytes of `buffer`. Neither source is mutated.
+
+<ParamField path="buffer" type="WispBuffer" required>
+  Buffer to append.
+</ParamField>
+
+**Returns** `WispBuffer`.
+
+---
+
+#### `slice(index, size?)`
+
+Returns a new `WispBuffer` containing the bytes from `index` up to (but not including) `size`.
+
+<ParamField path="index" type="number" required>
+  Start byte offset (inclusive).
+</ParamField>
+
+<ParamField path="size" type="number">
+  End byte offset (exclusive). Omitting this is equivalent to `buffer.bytes.slice(index)`.
+</ParamField>
+
+**Returns** `WispBuffer`.
+
+---
+
+#### `get_string()`
+
+Decodes the entire buffer as UTF-8 and returns the result as a JavaScript `string`.
+
+**Returns** `string`.
+
+---
+
+## `WispPacket` class
+
+Represents a complete Wisp frame: a 5-byte header (1-byte type + 4-byte little-endian stream ID) followed by a variable-length payload.
+
+### Static properties
+
+<ResponseField name="min_size" type="number">
+  `5` — the minimum valid byte length of any Wisp packet (header only, no payload).
+</ResponseField>
+
+### Constructor
+
+```js
+new WispPacket({ type, stream_id, payload, payload_bytes })
+```
+
+<ParamField path="type" type="number" required>
+  Packet type byte. One of the `packet_types` values.
+</ParamField>
+
+<ParamField path="stream_id" type="number" required>
+  4-byte unsigned integer stream identifier. `0` is reserved for connection-level control packets (CONTINUE on stream 0 carries the initial buffer size; INFO packets use stream 0).
+</ParamField>
+
+<ParamField path="payload" type="object">
+  An already-parsed payload instance (e.g. `ConnectPayload`, `DataPayload`). Set by `parse_all`; absent after `parse` alone.
+</ParamField>
+
+<ParamField path="payload_bytes" type="WispBuffer">
+  The raw payload bytes as read from the wire. Set by `parse`.
+</ParamField>
+
+### Static methods
+
+#### `WispPacket.parse(buffer)`
+
+Parses only the 5-byte header from `buffer`, returning a `WispPacket` with `payload_bytes` set but `payload` unpopulated.
+
+<ParamField path="buffer" type="WispBuffer" required>
+  Must be at least `WispPacket.min_size` bytes.
+</ParamField>
+
+**Returns** `WispPacket`.
+
+---
+
+#### `WispPacket.parse_all(buffer)`
+
+Parses the full packet, including the payload. Looks up the payload class in `packet_classes` by type byte, validates the minimum size, and calls `payload_class.parse(payload_bytes)`.
+
+<ParamField path="buffer" type="WispBuffer" required>
+  Complete serialized Wisp frame.
+</ParamField>
+
+**Returns** `WispPacket` with both `payload_bytes` and `payload` set. Throws `TypeError` if the buffer is too short, the type is unknown, or the payload is too short.
+
+---
+
+### Instance method
+
+#### `serialize()`
+
+Serializes the packet to a `WispBuffer` suitable for sending over a WebSocket. Calls `this.payload.serialize()` and concatenates it onto the 5-byte header.
+
+**Returns** `WispBuffer`.
+
+```js
+const buf = packet.serialize();
+ws.send(buf.bytes);
+```
+
+---
+
+## Payload classes
+
+Each payload class corresponds to one Wisp packet type. All share the same static interface (`type`, `name`, `min_size`, `parse`) and the same instance interface (`serialize`).
+
+---
+
+### `ConnectPayload`
+
+Sent by the client to open a new stream to a remote host.
+
+| Static | Value |
+|---|---|
+| `type` | `0x01` |
+| `name` | `"CONNECT"` |
+| `min_size` | `3` |
+
+#### Constructor
+
+```js
+new ConnectPayload({ stream_type, port, hostname })
+```
+
+<ParamField path="stream_type" type="number" required>
+  `0x01` for TCP, `0x02` for UDP.
+</ParamField>
+
+<ParamField path="port" type="number" required>
+  Destination port (16-bit unsigned integer, little-endian on the wire).
+</ParamField>
+
+<ParamField path="hostname" type="string" required>
+  Remote hostname or IP address. Encoded as UTF-8 bytes following the fixed 3-byte header.
+</ParamField>
+
+#### `ConnectPayload.parse(buffer)`
+
+Reads `stream_type` from byte 0, `port` from bytes 1–2 (little-endian), and `hostname` from the remaining bytes decoded as UTF-8.
+
+**Returns** `ConnectPayload`.
+
+#### `serialize()`
+
+Returns a `WispBuffer` of 3 + `hostname.length` bytes.
+
+---
+
+### `DataPayload`
+
+Carries raw application data in both directions.
+
+| Static | Value |
+|---|---|
+| `type` | `0x02` |
+| `name` | `"DATA"` |
+| `min_size` | `0` |
+
+#### Constructor
+
+```js
+new DataPayload({ data })
+```
+
+<ParamField path="data" type="WispBuffer" required>
+  The raw payload bytes.
+</ParamField>
+
+#### `DataPayload.parse(buffer)`
+
+Wraps the entire buffer as `data`.
+
+**Returns** `DataPayload`.
+
+#### `serialize()`
+
+Returns `this.data` unchanged (a `WispBuffer`).
+
+---
+
+### `ContinuePayload`
+
+Sent by the server to grant additional flow-control credit to a stream (or to stream 0 to report the initial buffer size).
+
+| Static | Value |
+|---|---|
+| `type` | `0x03` |
+| `name` | `"CONTINUE"` |
+| `min_size` | *(not defined; 4 bytes on the wire)* |
+
+#### Constructor
+
+```js
+new ContinuePayload({ buffer_remaining })
+```
+
+<ParamField path="buffer_remaining" type="number" required>
+  Number of additional DATA packets the client is permitted to send on this stream before the next CONTINUE.
+</ParamField>
+
+#### `ContinuePayload.parse(buffer)`
+
+Reads `buffer_remaining` as a 4-byte unsigned little-endian integer from offset 0.
+
+**Returns** `ContinuePayload`.
+
+#### `serialize()`
+
+Returns a 4-byte `WispBuffer`.
+
+---
+
+### `ClosePayload`
+
+Signals that a stream has been closed, along with the reason.
+
+| Static | Value |
+|---|---|
+| `type` | `0x04` |
+| `name` | `"CLOSE"` |
+| `min_size` | `1` |
+
+#### Constructor
+
+```js
+new ClosePayload({ reason })
+```
+
+<ParamField path="reason" type="number" required>
+  Numeric close reason. See `close_reasons` for the full list. Common values: `0x01` (Unknown), `0x02` (Voluntary), `0x03` (NetworkError).
+</ParamField>
+
+#### `ClosePayload.parse(buffer)`
+
+Reads `reason` from byte 0.
+
+**Returns** `ClosePayload`.
+
+#### `serialize()`
+
+Returns a 1-byte `WispBuffer`.
+
+---
+
+### `InfoPayload`
+
+Exchanged between client and server during the Wisp v2 handshake to advertise supported extensions.
+
+| Static | Value |
+|---|---|
+| `type` | `0x05` |
+| `name` | `"INFO"` |
+| `min_size` | `2` |
+
+#### Constructor
+
+```js
+new InfoPayload({ major_ver, minor_ver, extensions })
+```
+
+<ParamField path="major_ver" type="number" required>
+  Major protocol version byte.
+</ParamField>
+
+<ParamField path="minor_ver" type="number" required>
+  Minor protocol version byte.
+</ParamField>
+
+<ParamField path="extensions" type="WispBuffer" required>
+  Serialized extension data (produced by `serialize_extensions()`).
+</ParamField>
+
+#### `InfoPayload.parse(buffer)`
+
+Reads `major_ver` from byte 0, `minor_ver` from byte 1, and `extensions` from the remaining bytes.
+
+**Returns** `InfoPayload`.
+
+#### `serialize()`
+
+Returns a `WispBuffer` of 2 + `extensions.size` bytes.
+
+---
+
+## Exported maps
+
+### `packet_classes`
+
+Maps each packet type byte to its payload class. Used by `WispPacket.parse_all` to look up the correct parser.
+
+```js
+{
+  0x01: ConnectPayload,
+  0x02: DataPayload,
+  0x03: ContinuePayload,
+  0x04: ClosePayload,
+  0x05: InfoPayload,
+}
+```
+
+---
+
+### `packet_types`
+
+Named constants for the packet type byte. Use these instead of raw hex literals.
+
+```js
+{
+  CONNECT:  0x01,
+  DATA:     0x02,
+  CONTINUE: 0x03,
+  CLOSE:    0x04,
+  INFO:     0x05,
+}
+```
+
+---
+
+### `stream_types`
+
+Named constants for the stream type byte used in `ConnectPayload` and `ClientStream`.
+
+```js
+{
+  TCP: 0x01,
+  UDP: 0x02,
+}
+```
+
+---
+
+### `close_reasons`
+
+Named constants for all defined CLOSE reason codes.
+
+```js
+// Client or server
+Unknown:               0x01,
+Voluntary:             0x02,
+NetworkError:          0x03,
+IncompatibleExtensions: 0x04,
+
+// Server only
+InvalidInfo:      0x41,
+UnreachableHost:  0x42,
+NoResponse:       0x43,
+ConnRefused:      0x44,
+TransferTimeout:  0x47,
+HostBlocked:      0x48,
+ConnThrottled:    0x49,
+
+// Client only
+ClientError:      0x81,
+
+// Extension-specific
+AuthBadPassword:        0xc0,
+AuthBadSignature:       0xc1,
+AuthMissingCredentials: 0xc2,
+```
+
+---
+
+## Low-level example
+
+Manually construct and serialize a CONNECT packet:
+
+```js
+import {
+  WispBuffer, WispPacket, ConnectPayload, packet_types
+} from '@mercuryworkshop/wisp-js';
+
+const payload = new ConnectPayload({
+  stream_type: 0x01,   // TCP
+  port: 80,
+  hostname: 'example.com',
+});
+
+const packet = new WispPacket({
+  type: packet_types.CONNECT,
+  stream_id: 1,
+  payload,
+});
+
+const raw = packet.serialize(); // WispBuffer
+ws.send(raw.bytes);             // Uint8Array → WebSocket
+```
+
+Parse an incoming raw frame:
+
+```js
+import { WispBuffer, WispPacket } from '@mercuryworkshop/wisp-js';
+
+ws.onmessage = (event) => {
+  const buffer = new WispBuffer(new Uint8Array(event.data));
+  const packet = WispPacket.parse_all(buffer);
+  console.log('type:', packet.type, 'stream_id:', packet.stream_id);
+  console.log('payload:', packet.payload);
+};
+```

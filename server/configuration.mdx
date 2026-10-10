@@ -1,0 +1,215 @@
+---
+title: "Configuring the Wisp Server Options"
+sidebarTitle: "Configuration"
+description: "Full reference for all wisp.options settings — hostname and port restrictions, IP rules, DNS configuration, stream limits, and Wisp v2 settings."
+---
+
+The server package exposes a single mutable `options` object that controls every aspect of server behavior — from destination filtering and stream limits to DNS resolution strategy and Wisp v2 features. All settings have safe defaults so the server works out of the box, and you can override any subset of them at startup.
+
+## Setting Options
+
+Import `server` and write to `options` directly before your HTTP server starts accepting connections:
+
+```js
+import { server as wisp } from "@mercuryworkshop/wisp-js/server";
+
+wisp.options.allow_udp_streams = true;
+wisp.options.allow_private_ips = false;
+wisp.options.hostname_blacklist = [/\.internal\.corp$/];
+wisp.options.dns_ttl = 60;
+```
+
+---
+
+## Destination Restrictions
+
+These options control which hostnames, ports, and IP addresses the server will proxy to.
+
+<ParamField body="hostname_blacklist" type="RegExp[] | null" default="null">
+  An array of regular expressions tested against the destination hostname. If any expression matches, the stream is refused with `HostBlocked`. Ignored when `hostname_whitelist` is set.
+
+  ```js
+  wisp.options.hostname_blacklist = [/malware\.example\.com/, /\.evil\.tld$/];
+  ```
+</ParamField>
+
+<ParamField body="hostname_whitelist" type="RegExp[] | null" default="null">
+  An array of regular expressions. Only hostnames that match at least one expression are allowed. Takes precedence over `hostname_blacklist` — if both are set, the blacklist is ignored.
+
+  ```js
+  wisp.options.hostname_whitelist = [/\.allowed-domain\.com$/, /^safe\.host$/];
+  ```
+</ParamField>
+
+<ParamField body="port_blacklist" type="(number | [number, number])[] | null" default="null">
+  An array of port numbers or `[min, max]` range pairs to block. Ignored when `port_whitelist` is set.
+
+  ```js
+  wisp.options.port_blacklist = [25, [6660, 6669]]; // block SMTP and IRC
+  ```
+</ParamField>
+
+<ParamField body="port_whitelist" type="(number | [number, number])[] | null" default="null">
+  An array of port numbers or `[min, max]` range pairs. Only ports that match are permitted. Takes precedence over `port_blacklist`.
+
+  ```js
+  wisp.options.port_whitelist = [80, 443, [8000, 8999]];
+  ```
+</ParamField>
+
+<ParamField body="allow_direct_ip" type="boolean" default="true">
+  When `false`, clients cannot open streams to bare IP addresses — hostnames must be used instead. Useful for preventing clients from bypassing DNS-level hostname filtering.
+</ParamField>
+
+<ParamField body="allow_private_ips" type="boolean" default="false">
+  When `false` (the default), streams to private/RFC-1918 address ranges (e.g. `10.0.0.0/8`, `192.168.0.0/16`), link-local, and carrier-grade NAT addresses are blocked. Enable with caution on public-facing servers.
+</ParamField>
+
+<ParamField body="allow_loopback_ips" type="boolean" default="false">
+  When `false` (the default), streams to loopback addresses (`127.0.0.0/8`, `::1`) and unspecified addresses are blocked.
+</ParamField>
+
+---
+
+## Client Connection Restrictions
+
+These options limit what types of streams clients can open and how many simultaneous streams are allowed.
+
+<ParamField body="stream_limit_per_host" type="number" default="-1">
+  Maximum number of concurrent open streams to a single destination hostname per connection. Set to `-1` for unlimited.
+
+  ```js
+  wisp.options.stream_limit_per_host = 10;
+  ```
+</ParamField>
+
+<ParamField body="stream_limit_total" type="number" default="-1">
+  Maximum number of concurrent open streams across all destinations per connection. Set to `-1` for unlimited.
+
+  ```js
+  wisp.options.stream_limit_total = 50;
+  ```
+</ParamField>
+
+<ParamField body="allow_udp_streams" type="boolean" default="true">
+  When `false`, UDP stream requests from clients are rejected with `HostBlocked`. In Wisp v2, the UDP extension advertisement is also suppressed.
+</ParamField>
+
+<ParamField body="allow_tcp_streams" type="boolean" default="true">
+  When `false`, TCP stream requests from clients are rejected with `HostBlocked`.
+</ParamField>
+
+<Note>
+  `client_ip_blacklist` and `client_ip_whitelist` are defined in the options schema but are **not yet implemented**. Setting them currently has no effect.
+</Note>
+
+---
+
+## DNS Options
+
+<ParamField body="dns_ttl" type="number" default="120">
+  Time-to-live in seconds for DNS cache entries. After this period, the server re-resolves the hostname on the next stream request. Set to `0` to disable caching.
+</ParamField>
+
+<ParamField body="dns_method" type='"lookup" | "resolve" | Function' default='"lookup"'>
+  Controls how DNS resolution is performed:
+
+  - `"lookup"` — Uses Node's `dns.lookup()`, which goes through the OS resolver (respects `/etc/hosts`, `nsswitch.conf`, etc.).
+  - `"resolve"` — Uses `dns.resolve4()` / `dns.resolve6()` directly, bypassing the OS resolver. Enables custom `dns_servers`.
+  - A **custom async function** `(hostname: string) => Promise<string>` — Fully replaces the built-in resolver.
+
+  ```js
+  // Custom resolver example
+  wisp.options.dns_method = async (hostname) => {
+    const ip = await myCustomDNS.resolve(hostname);
+    return ip;
+  };
+  ```
+</ParamField>
+
+<ParamField body="dns_servers" type="string[] | null" default="null">
+  An array of DNS server addresses to use when `dns_method` is `"resolve"`. Passed directly to `dns.Resolver.setServers()`. Has no effect when `dns_method` is `"lookup"`.
+
+  ```js
+  wisp.options.dns_method = "resolve";
+  wisp.options.dns_servers = ["1.1.1.1", "8.8.8.8"];
+  ```
+</ParamField>
+
+<ParamField body="dns_result_order" type='"verbatim" | "ipv4first" | "ipv6first"' default='"verbatim"'>
+  Controls IP version preference when a hostname resolves to multiple addresses:
+
+  - `"verbatim"` — Use the first result as returned by the resolver.
+  - `"ipv4first"` — Prefer IPv4 addresses; fall back to IPv6.
+  - `"ipv6first"` — Prefer IPv6 addresses; fall back to IPv4.
+</ParamField>
+
+---
+
+## Real IP Parsing
+
+<ParamField body="parse_real_ip" type="boolean" default="true">
+  When `true`, the server reads the `X-Forwarded-For` or `X-Real-IP` request headers to determine the true client IP address. This is used for logging and (once implemented) IP-based access control.
+</ParamField>
+
+<ParamField body="parse_real_ip_from" type="string[]" default='["127.0.0.1"]'>
+  An array of trusted proxy IP addresses from which real-IP headers are accepted. Headers sent by any other address are ignored. By default only `127.0.0.1` (localhost) is trusted.
+
+  ```js
+  wisp.options.parse_real_ip_from = ["127.0.0.1", "10.0.0.1"];
+  ```
+</ParamField>
+
+---
+
+## Wisp v2 Options
+
+<ParamField body="wisp_version" type="1 | 2" default="2">
+  The Wisp protocol version advertised to connecting clients. Set to `1` to disable v2 negotiation entirely and operate in compatibility mode.
+
+  ```js
+  wisp.options.wisp_version = 1; // force v1 for all connections
+  ```
+</ParamField>
+
+<ParamField body="wisp_motd" type="string | null" default="null">
+  A message-of-the-day string sent to Wisp v2 clients via the `MOTDExtension` during the handshake. Set to `null` to disable. Has no effect when `wisp_version` is `1`.
+
+  ```js
+  wisp.options.wisp_motd = "Welcome to the Plutonium proxy. Please read the ToS.";
+  ```
+</ParamField>
+
+---
+
+## JSON Configuration File
+
+When running the server from the command line via the `--config` flag, options can be loaded from a JSON file. The keys map directly to the `options` property names:
+
+```json
+{
+  "hostname_blacklist": [],
+  "hostname_whitelist": null,
+  "port_blacklist": [25],
+  "port_whitelist": null,
+  "allow_direct_ip": true,
+  "allow_private_ips": false,
+  "allow_loopback_ips": false,
+  "stream_limit_per_host": -1,
+  "stream_limit_total": -1,
+  "allow_udp_streams": true,
+  "allow_tcp_streams": true,
+  "dns_ttl": 120,
+  "dns_method": "lookup",
+  "dns_servers": null,
+  "dns_result_order": "verbatim",
+  "parse_real_ip": true,
+  "parse_real_ip_from": ["127.0.0.1"],
+  "wisp_version": 2,
+  "wisp_motd": null
+}
+```
+
+<Note>
+  Regular expression values (for `hostname_blacklist` / `hostname_whitelist`) cannot be represented natively in JSON. When using a config file, supply them as strings and they will be converted to `RegExp` objects. Pattern flags are not supported via config files — use the JavaScript API for advanced regex requirements.
+</Note>

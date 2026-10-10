@@ -1,0 +1,96 @@
+---
+title: "WsProxy: Raw WebSocket-to-TCP Proxying"
+sidebarTitle: "WsProxy"
+description: "Use WsProxy mode to tunnel a single TCP connection over WebSocket without the Wisp framing protocol — encoded as hostname:port in the URL path."
+---
+
+WsProxy is a lightweight proxy mode built into the Wisp server that does not use the Wisp packet framing protocol at all. Instead of multiplexing multiple logical streams over one WebSocket, WsProxy maps a single WebSocket connection directly to a single outbound TCP connection — raw WebSocket frames in both directions are relayed byte-for-byte to and from the TCP socket.
+
+This makes WsProxy trivially simple to consume from any environment that has a native `WebSocket` API, with no Wisp client library required.
+
+<Note>
+  WsProxy only supports TCP. UDP streams and Wisp v2 extensions are not available in WsProxy mode.
+</Note>
+
+## How It Works
+
+The Wisp server distinguishes WsProxy from Wisp connections using the URL path of the WebSocket upgrade request:
+
+- A path **ending with `/`** → Wisp connection (`ServerConnection`)
+- A path **not ending with `/`** → WsProxy connection (`WSProxyConnection`)
+
+The destination hostname and port are encoded as the **last segment of the URL path** in the format `hostname:port`:
+
+```
+ws://localhost:5001/example.com:80
+ws://localhost:5001/proxy/example.com:443
+```
+
+The server parses the last path segment, splits on `:`, and uses the result as the TCP destination. No additional framing, headers, or handshake messages are exchanged — the WebSocket upgrade response itself signals that the TCP connection is established and ready.
+
+## WSProxyConnection Internals
+
+When `routeRequest` receives an upgrade on a non-`/`-terminated path it instantiates a `WSProxyConnection` and calls `setup()`:
+
+1. **Parses the destination** — Splits the last path segment on `:` to extract `hostname` and `port`.
+2. **Runs the filter** — Calls `is_stream_allowed(null, stream_types.TCP, hostname, port)` with the same filtering rules used for Wisp streams. If the destination is blocked, the WebSocket is closed and an `AccessDeniedError` is thrown.
+3. **Connects to the TCP host** — Opens a `NodeTCPSocket` to the resolved address.
+4. **Bridges the streams** — Launches two background tasks:
+   - `tcp_to_ws`: reads chunks from the TCP socket and sends them as binary WebSocket frames.
+   - `ws_to_tcp`: reads binary WebSocket frames and writes them to the TCP socket.
+
+When either side closes, the other side is closed as well, tearing down the whole connection cleanly.
+
+## Same Filtering Rules as Wisp
+
+WsProxy obeys exactly the same `is_stream_allowed` filter as Wisp TCP streams. This means all of the following options apply equally to WsProxy connections:
+
+```js
+import { server as wisp } from "@mercuryworkshop/wisp-js/server";
+
+wisp.options.hostname_blacklist   = [/\.restricted\.tld$/];
+wisp.options.port_whitelist       = [80, 443];
+wisp.options.allow_private_ips    = false;
+wisp.options.allow_loopback_ips   = false;
+```
+
+Stream count limits (`stream_limit_total`, `stream_limit_per_host`) are the only filtering rules that do **not** apply — since each WsProxy connection is a single stream, there is no associated `ServerConnection` object to track counts against.
+
+## Connecting from the Browser
+
+Because WsProxy uses plain WebSocket binary frames with no additional framing, you can connect with the browser's built-in `WebSocket` constructor:
+
+```js
+// Open a WsProxy tunnel to example.com:80
+const ws = new WebSocket("ws://localhost:5001/example.com:80");
+ws.binaryType = "arraybuffer";
+
+ws.addEventListener("open", () => {
+  // Send an HTTP request as raw bytes
+  const encoder = new TextEncoder();
+  ws.send(encoder.encode("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"));
+});
+
+ws.addEventListener("message", (event) => {
+  // Receive raw TCP bytes from the server
+  const decoder = new TextDecoder();
+  console.log(decoder.decode(event.data));
+});
+
+ws.addEventListener("close", () => {
+  console.log("Connection closed");
+});
+```
+
+Every `send()` call maps directly to a TCP write on the server side, and every incoming TCP chunk is delivered as a binary `message` event in the browser.
+
+## When to Use WsProxy
+
+WsProxy is a good fit when:
+
+- Your application already communicates with a single upstream server over a custom binary or text protocol.
+- You want proxy support without bundling a full Wisp client library.
+- You are integrating with legacy tools that speak raw WebSocket but not the Wisp framing protocol.
+- You need a quick way to expose a TCP service over WebSocket for browser-based clients.
+
+For use cases that require **multiplexed** connections to multiple destinations from a single WebSocket, use the full Wisp protocol with the [Wisp client](/client/usage) instead.

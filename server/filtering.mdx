@@ -1,0 +1,123 @@
+---
+title: "Filtering and Access Control for Wisp Streams"
+sidebarTitle: "Filtering"
+description: "Control which hosts, ports, and IP ranges the Wisp server will proxy — using hostname/port whitelists and blacklists, IP restrictions, and stream count limits."
+---
+
+Every stream request — whether from a Wisp connection or a WsProxy connection — passes through the server's filtering system before any TCP or UDP socket is opened. If a stream fails any check, the server sends a `CLOSE` packet with an appropriate reason code and never establishes the outbound connection. This makes filtering a safe, server-enforced boundary that clients cannot bypass.
+
+## Hostname Filtering
+
+Hostname filtering uses arrays of `RegExp` objects. The server tests the destination hostname against each pattern in order.
+
+<Warning>
+  **Whitelist takes priority over blacklist.** If `hostname_whitelist` is set to a non-null value, `hostname_blacklist` is completely ignored — even if both are configured. Use one or the other, not both.
+</Warning>
+
+**Whitelist** — only allow connections to matching hostnames:
+
+```js
+import { server as wisp } from "@mercuryworkshop/wisp-js/server";
+
+// Only allow connections to *.example.com and a specific IP
+wisp.options.hostname_whitelist = [
+  /\.example\.com$/,
+  /^203\.0\.113\.10$/
+];
+```
+
+**Blacklist** — block connections to matching hostnames:
+
+```js
+// Block a specific host and any subdomain of .malicious.tld
+wisp.options.hostname_blacklist = [
+  /malicious\.host/,
+  /\.malicious\.tld$/
+];
+```
+
+When neither list is set (`null`), all hostnames pass the hostname check (subject to IP and port checks below).
+
+## Port Filtering
+
+Port rules accept either plain port numbers or `[min, max]` two-element arrays representing an inclusive range. As with hostname filtering, the whitelist takes priority if both are set.
+
+```js
+// Whitelist: only allow HTTP, HTTPS, and common dev ports
+wisp.options.port_whitelist = [80, 443, [3000, 3999], 8080];
+
+// Blacklist: block SMTP (25), IRC (6660–6669), and common exploit ports
+wisp.options.port_blacklist = [25, [6660, 6669], 1080, 4444];
+```
+
+## IP Restrictions
+
+IP-level restrictions apply after hostname and port checks. When the destination is a hostname rather than a bare IP, the server performs a DNS lookup to resolve it to an IP address before evaluating the following options — this prevents hostname-based bypasses of IP restrictions.
+
+<ParamField body="allow_direct_ip" type="boolean" default="true">
+  When `false`, clients cannot open streams to bare IP address literals. All destinations must be hostnames.
+</ParamField>
+
+<ParamField body="allow_private_ips" type="boolean" default="false">
+  When `false` (the default), the server blocks connections to private address ranges including `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, link-local (`169.254.0.0/16`), and carrier-grade NAT (`100.64.0.0/10`) addresses.
+</ParamField>
+
+<ParamField body="allow_loopback_ips" type="boolean" default="false">
+  When `false` (the default), the server blocks connections to `127.0.0.0/8`, `::1`, and unspecified addresses.
+</ParamField>
+
+Example — restrict the server to only publicly routable addresses:
+
+```js
+wisp.options.allow_direct_ip    = false; // require hostnames
+wisp.options.allow_private_ips  = false; // block RFC-1918
+wisp.options.allow_loopback_ips = false; // block loopback
+```
+
+## Stream Limits
+
+Stream limits cap concurrent open streams to prevent resource exhaustion. Both limits apply per individual Wisp connection (not globally across all clients).
+
+<ParamField body="stream_limit_total" type="number" default="-1">
+  Maximum total open streams per connection across all destinations. `-1` means unlimited.
+
+  ```js
+  wisp.options.stream_limit_total = 100;
+  ```
+</ParamField>
+
+<ParamField body="stream_limit_per_host" type="number" default="-1">
+  Maximum open streams to a single destination hostname per connection. `-1` means unlimited.
+
+  ```js
+  wisp.options.stream_limit_per_host = 10;
+  ```
+</ParamField>
+
+When a new stream request would exceed either limit, the server closes it immediately with the `ConnThrottled` reason code instead of `HostBlocked`.
+
+<Note>
+  Stream limits are not enforced for WsProxy connections, since WsProxy is inherently a single-stream protocol (one TCP connection per WebSocket). Only the hostname, port, and IP checks apply to WsProxy.
+</Note>
+
+## Protocol Restrictions
+
+You can independently enable or disable TCP and UDP stream types:
+
+```js
+wisp.options.allow_tcp_streams = true;  // default
+wisp.options.allow_udp_streams = false; // disable UDP entirely
+```
+
+When `allow_udp_streams` is `false` and `wisp_version` is `2`, the server also omits the `UDPExtension` from the Wisp v2 handshake, so well-behaved clients won't attempt to open UDP streams at all.
+
+## Close Reason Codes
+
+When a stream is refused by the filtering system, the server sends a `CLOSE` packet with one of the following reason codes:
+
+| Reason | Value | Condition |
+|---|---|---|
+| `HostBlocked` | `0x48` | Hostname, port, or IP check failed; protocol type not allowed |
+| `ConnThrottled` | `0x49` | Stream count limit (`stream_limit_total` or `stream_limit_per_host`) exceeded |
+
+These are part of the standard Wisp close reason set. Clients can inspect the close reason to distinguish a policy refusal from a network error.

@@ -1,0 +1,307 @@
+---
+title: "ClientConnection API Reference"
+sidebarTitle: "ClientConnection"
+description: "API reference for ClientConnection — the browser-side class that opens a Wisp WebSocket, negotiates the protocol, and manages multiple TCP/UDP streams."
+---
+
+`ClientConnection` is the core browser-side class in `@mercuryworkshop/wisp-js`. It opens a WebSocket to a Wisp server, performs the v2 or v1 handshake, and multiplexes any number of TCP or UDP `ClientStream` instances over that single connection. Import it from the `/client` entry-point:
+
+```js
+import { ClientConnection } from '@mercuryworkshop/wisp-js/client';
+```
+
+---
+
+## `ClientConnection` class
+
+### Constructor
+
+```js
+new ClientConnection(wisp_url, options)
+```
+
+Constructs a new `ClientConnection`, validates the URL, initialises internal state, optionally populates default extensions, and immediately calls `connect_ws()` to begin the WebSocket handshake.
+
+<ParamField path="wisp_url" type="string" required>
+  Full WebSocket URL of the Wisp endpoint, e.g. `wss://wisp.example.com/wisp/`. **Must end with a trailing `/`** — a `TypeError` is thrown if it does not.
+</ParamField>
+
+<ParamField path="options" type="object">
+  Optional configuration object.
+
+  <Expandable title="options fields">
+    <ParamField path="options.wisp_version" type="number" default={2}>
+      Wisp protocol version to request. Defaults to `2`. If the server rejects the v2 subprotocol the client automatically retries as v1.
+    </ParamField>
+    <ParamField path="options.wisp_extensions" type="Array | null" default="null">
+      Array of extension instances to advertise during the Wisp v2 INFO handshake. When this is `null` **and** `wisp_version` is `2`, the client automatically adds `UDPExtension` and `MOTDExtension`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+---
+
+### Properties
+
+<ResponseField name="wisp_url" type="string">
+  The WebSocket URL passed to the constructor.
+</ResponseField>
+
+<ResponseField name="wisp_version" type="number">
+  The active negotiated protocol version (`1` or `2`). Starts at the value given in `options.wisp_version` and may be downgraded to `1` if the server does not support the `wisp-v2` WebSocket subprotocol.
+</ResponseField>
+
+<ResponseField name="wisp_extensions" type="Array | null">
+  The array of extension instances that are advertised to the server. Populated automatically when `wisp_version` is `2` and no extensions were provided explicitly.
+</ResponseField>
+
+<ResponseField name="max_buffer_size" type="number | null">
+  The initial flow-control buffer size reported by the server in the stream-0 CONTINUE packet. `null` until the connection handshake completes.
+</ResponseField>
+
+<ResponseField name="active_streams" type="object">
+  A plain object (`stream_id → ClientStream`) containing every currently open stream. Streams are removed when they are closed — either by `close_stream()` or by `cleanup()`.
+</ResponseField>
+
+<ResponseField name="connected" type="boolean">
+  `true` once the server handshake has completed and streams may be created. Resets to `false` when `cleanup()` is called.
+</ResponseField>
+
+<ResponseField name="connecting" type="boolean">
+  `true` while the underlying WebSocket is open but the first inbound message has not yet been processed. Both `connecting` and `connected` are `false` before the socket opens and after it closes.
+</ResponseField>
+
+<ResponseField name="next_stream_id" type="number">
+  Monotonically increasing counter. Each call to `create_stream` uses the current value as the new stream's `stream_id` and then increments it. Starts at `1`.
+</ResponseField>
+
+<ResponseField name="server_exts" type="object">
+  A map of `extension_id → parsed extension instance` for every extension the server advertised and that the client also supports. Populated after the INFO exchange completes (Wisp v2 only).
+</ResponseField>
+
+<ResponseField name="client_exts" type="object">
+  A map of `extension_id → extension instance` for every extension the client advertised and that the server also agreed to. Populated at the same time as `server_exts`.
+</ResponseField>
+
+<ResponseField name="server_motd" type="string | null">
+  The message-of-the-day string from the server if it advertised `MOTDExtension`, otherwise `null`. Only available after the INFO handshake (Wisp v2 only).
+</ResponseField>
+
+<ResponseField name="udp_enabled" type="boolean">
+  `true` if the server advertised `UDPExtension` support. Defaults to `true` on construction and is set to `false` when the INFO exchange completes without a UDP extension from the server (Wisp v2 only).
+</ResponseField>
+
+---
+
+### Event callbacks
+
+These properties are plain function slots — assign them directly before or immediately after constructing the connection.
+
+<ResponseField name="onopen" type="() => void">
+  Called once the connection handshake succeeds and the connection is ready to create streams. This fires on the first inbound message from the server that sets `connected = true`.
+</ResponseField>
+
+<ResponseField name="onclose" type="() => void">
+  Called when the underlying WebSocket closes normally.
+</ResponseField>
+
+<ResponseField name="onerror" type="() => void">
+  Called when an unrecoverable error occurs. When using Wisp v2, errors trigger an automatic v1 retry first — `onerror` only fires if both attempts fail.
+</ResponseField>
+
+<ResponseField name="onmessage" type="() => void">
+  Reserved message callback. Not invoked by the current implementation (individual stream data is routed to `ClientStream.onmessage`).
+</ResponseField>
+
+---
+
+### Methods
+
+#### `create_stream(hostname, port, type?)`
+
+Opens a new multiplexed Wisp stream, sends a CONNECT packet over the WebSocket, and returns a `ClientStream` immediately.
+
+```js
+const stream = connection.create_stream('example.com', 80);
+const udpStream = connection.create_stream('8.8.8.8', 53, 'udp');
+```
+
+<ParamField path="hostname" type="string" required>
+  Remote hostname or IP address to connect to.
+</ParamField>
+
+<ParamField path="port" type="number" required>
+  Remote port number (1–65535).
+</ParamField>
+
+<ParamField path="type" type="number | string" default="0x01">
+  Stream type. Pass `0x01` or `'tcp'` for a TCP stream, or `0x02` or `'udp'` for a UDP stream. Throws an `Error` if `'udp'` is requested and `udp_enabled` is `false`.
+</ParamField>
+
+**Returns** a new `ClientStream` instance registered in `active_streams`.
+
+---
+
+#### `close_stream(stream, reason)`
+
+Fires `stream.onclose(reason)` and removes the stream from `active_streams`. Called internally when a CLOSE packet is received from the server, and by `cleanup()`.
+
+<ParamField path="stream" type="ClientStream" required>
+  The stream to close.
+</ParamField>
+
+<ParamField path="reason" type="number" required>
+  Numeric close-reason code passed verbatim to `stream.onclose`.
+</ParamField>
+
+---
+
+#### `close()`
+
+Closes the underlying WebSocket. This will eventually trigger `onclose`.
+
+```js
+connection.close();
+```
+
+---
+
+#### `connect_ws()`
+
+Internal method that creates the raw WebSocket and wires up its event handlers. When `wisp_version` is `2`, the WebSocket is opened with the `"wisp-v2"` subprotocol. If the server rejects it (error event fires before the connection is established), the method resets the state and calls itself again with `wisp_version` forced to `1`.
+
+You generally do not need to call this directly — it is invoked automatically by the constructor.
+
+---
+
+#### `cleanup()`
+
+Sets `connected` and `connecting` to `false`, then calls `close_stream` for every stream in `active_streams` with reason `0x03` (`NetworkError`). Called automatically when the WebSocket closes or errors.
+
+```js
+connection.cleanup();
+```
+
+---
+
+## `ClientStream` class
+
+`ClientStream` is returned by `ClientConnection.create_stream()`. It represents a single multiplexed TCP or UDP stream. You do not instantiate it directly.
+
+### Properties
+
+<ResponseField name="hostname" type="string">
+  The remote hostname passed to `create_stream`.
+</ResponseField>
+
+<ResponseField name="port" type="number">
+  The remote port passed to `create_stream`.
+</ResponseField>
+
+<ResponseField name="stream_id" type="number">
+  The numeric ID assigned to this stream, unique within its connection.
+</ResponseField>
+
+<ResponseField name="stream_type" type="number">
+  `0x01` for TCP, `0x02` for UDP.
+</ResponseField>
+
+<ResponseField name="buffer_size" type="number">
+  Current flow-control credit — the number of DATA packets that may be sent before the server must acknowledge with a CONTINUE packet. Initialised to `connection.max_buffer_size` and decremented by each `send()` call. Replenished by `continue_received()`. UDP streams ignore this value.
+</ResponseField>
+
+<ResponseField name="open" type="boolean">
+  `true` while the stream is active. Set to `false` after `close()` is called or the connection is cleaned up.
+</ResponseField>
+
+<ResponseField name="send_buffer" type="Array">
+  Queue of pending `Uint8Array` payloads waiting for buffer credit. Populated when `send()` is called with `buffer_size === 0` on a TCP stream. Drained automatically by `continue_received()`.
+</ResponseField>
+
+---
+
+### Event callbacks
+
+<ResponseField name="onopen" type="() => void">
+  Called when the stream is first marked `open`. Assign this before the next event-loop tick.
+</ResponseField>
+
+<ResponseField name="onclose" type="(reason: number) => void">
+  Called when the stream is closed. `reason` is a numeric code from `close_reasons` (e.g. `0x02` for a voluntary close).
+</ResponseField>
+
+<ResponseField name="onmessage" type="(data: Uint8Array) => void">
+  Called each time a DATA packet arrives for this stream. `data` is a raw `Uint8Array` of the payload bytes.
+</ResponseField>
+
+---
+
+### Methods
+
+#### `send(data)`
+
+Sends a DATA packet over the stream. For TCP streams, if `buffer_size` is zero the data is queued in `send_buffer` instead of being transmitted immediately. UDP streams always transmit immediately.
+
+<ParamField path="data" type="Uint8Array" required>
+  Raw bytes to send.
+</ParamField>
+
+---
+
+#### `close(reason?)`
+
+Sends a CLOSE packet to the server and marks the stream as closed. No-op if the stream is already closed.
+
+<ParamField path="reason" type="number" default="0x01">
+  Close reason code. Defaults to `0x01` (`Unknown`). Use `0x02` for a voluntary/clean close.
+</ParamField>
+
+---
+
+#### `continue_received(buffer_size)`
+
+Called internally when a CONTINUE packet arrives for this stream. Resets `buffer_size` to the new value and flushes any data queued in `send_buffer`.
+
+<ParamField path="buffer_size" type="number" required>
+  New `buffer_remaining` value from the CONTINUE packet.
+</ParamField>
+
+---
+
+## Complete example
+
+The following example connects to a Wisp server, opens a TCP stream to an HTTP server, sends a GET request, and prints the response body.
+
+```js
+import { ClientConnection } from '@mercuryworkshop/wisp-js/client';
+
+const connection = new ClientConnection('wss://wisp.example.com/wisp/');
+
+connection.onopen = () => {
+  console.log('Connected — MOTD:', connection.server_motd);
+
+  const stream = connection.create_stream('neverssl.com', 80);
+
+  stream.onmessage = (data) => {
+    console.log(new TextDecoder().decode(data));
+  };
+
+  stream.onclose = (reason) => {
+    console.log('Stream closed, reason:', reason);
+    connection.close();
+  };
+
+  const request = [
+    'GET / HTTP/1.0',
+    'Host: neverssl.com',
+    'Connection: close',
+    '',
+    '',
+  ].join('\r\n');
+
+  stream.send(new TextEncoder().encode(request));
+};
+
+connection.onclose = () => console.log('Connection closed');
+connection.onerror = () => console.error('Connection error');
+```

@@ -1,47 +1,160 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with Wisp for Plutonium"
+sidebarTitle: "Quickstart"
+description: "Stand up a Wisp server and connect your first client stream in under five minutes using @mercuryworkshop/wisp-js."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+This guide walks you through installing `@mercuryworkshop/wisp-js`, starting a Wisp server in Node.js, and opening a multiplexed TCP stream from the browser. By the end you will have a working end-to-end Wisp connection and a clear mental model of how clients and servers interact.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+
+  <Step title="Install the package">
+    Install `@mercuryworkshop/wisp-js` from npm:
+
+    <CodeGroup>
+      ```bash npm
+      npm install @mercuryworkshop/wisp-js
+      ```
+
+      ```bash yarn
+      yarn add @mercuryworkshop/wisp-js
+      ```
+
+      ```bash pnpm
+      pnpm add @mercuryworkshop/wisp-js
+      ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Start the Wisp server">
+    Create a Node.js HTTP server and forward WebSocket upgrade events to `routeRequest`. The function detects whether the incoming path ends with `/` (Wisp connection) or not (WsProxy connection) and handles each case automatically.
+
+    ```js server.mjs
+    import http from "node:http";
+    import { server as wisp, logging } from "@mercuryworkshop/wisp-js/server";
+
+    // Optional: adjust server options before accepting connections.
+    // wisp.options.allow_udp_streams = true;
+    // wisp.options.hostname_blacklist = [/\.internal$/];
+
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("Wisp server is running.\n");
+    });
+
+    // Forward every WebSocket upgrade to the Wisp router.
+    server.on("upgrade", (req, socket, head) => {
+      wisp.routeRequest(req, socket, head);
+    });
+
+    server.on("listening", () => {
+      logging.info("Wisp server listening on http://127.0.0.1:5001");
+    });
+
+    server.listen(5001, "127.0.0.1");
+    ```
+
+    Run it with:
 
     ```bash
-    npm install your-package
+    node server.mjs
     ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+    Alternatively, use the built-in CLI server that ships with the package:
 
     ```bash
-    your-cli init
+    npx wisp-js-server --host 127.0.0.1 --port 5001 --logging INFO
     ```
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
 
-    ```bash
-    your-cli start
+  <Step title="Connect from the browser">
+    Import `ClientConnection` in your browser-side (or bundled) code. Pass the Wisp server WebSocket URL — it **must** end with a trailing `/`. Then call `create_stream` to open a multiplexed TCP stream to any reachable host.
+
+    ```js client.js
+    import { ClientConnection } from "@mercuryworkshop/wisp-js/client";
+
+    // Connect to the Wisp server. The URL must end with a trailing slash.
+    const conn = new ClientConnection("ws://localhost:5001/");
+
+    conn.onopen = () => {
+      console.log("Wisp connection established.");
+
+      // Open a TCP stream to example.com:80.
+      // Third argument defaults to TCP (0x01); pass "udp" or 0x02 for UDP.
+      const stream = conn.create_stream("example.com", 80);
+
+      stream.onopen = () => {
+        console.log("Stream open — sending HTTP request.");
+        const request = new TextEncoder().encode(
+          "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+        );
+        stream.send(request);
+      };
+
+      stream.onmessage = (data) => {
+        // data is a Uint8Array of raw bytes from the remote host.
+        console.log("Received:", new TextDecoder().decode(data));
+      };
+
+      stream.onclose = (reason) => {
+        console.log("Stream closed, reason code:", reason);
+      };
+    };
+
+    conn.onerror = () => {
+      console.error("Wisp connection failed.");
+    };
     ```
+
+    `ClientConnection` automatically negotiates Wisp v2 on construction. If the server does not support v2, the client transparently retries with v1 — no extra code required.
   </Step>
+
+  <Step title="Send and receive data">
+    Once a stream is open, use `stream.send(data)` to write bytes and `stream.onmessage` to receive them. Both directions are fully asynchronous and flow-controlled.
+
+    ```js
+    // Send a Uint8Array of raw bytes to the remote host.
+    const payload = new TextEncoder().encode("Hello, world!\n");
+    stream.send(payload);
+
+    // Receive raw bytes from the remote host.
+    stream.onmessage = (data) => {
+      // data is a Uint8Array
+      console.log("Got", data.byteLength, "bytes from remote.");
+    };
+
+    // Close the stream when done (reason 0x01 = voluntary close).
+    stream.close();
+
+    // Or close the entire Wisp connection (closes all active streams).
+    conn.close();
+    ```
+
+    Flow control is handled automatically: if the server's receive buffer fills up, `send()` queues messages internally and flushes them as `CONTINUE` packets arrive. You do not need to manage backpressure manually.
+  </Step>
+
 </Steps>
 
 <Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+  **Drop-in WebSocket replacement with `WispWebSocket`**
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+  If your codebase already uses the native `WebSocket` API, you can proxy all connections through Wisp without rewriting your networking code. `WispWebSocket` implements the full DOM `WebSocket` interface and multiplexes streams over a shared `ClientConnection` automatically.
+
+  ```js
+  import { WispWebSocket } from "@mercuryworkshop/wisp-js/client";
+
+  // URL format: <wisp-server-ws-url><hostname>:<port>
+  // The trailing slash of the Wisp endpoint is replaced by host:port.
+  const ws = new WispWebSocket("ws://localhost:5001/example.com:80");
+
+  ws.onopen = () => ws.send("GET / HTTP/1.0\r\n\r\n");
+  ws.onmessage = (event) => console.log(event.data);
+  ws.onclose = (event) => console.log("closed:", event.code);
+  ```
+
+  Multiple `WispWebSocket` instances pointing to the same Wisp server endpoint automatically share one underlying `ClientConnection`, each on its own stream.
 </Tip>
+
+<Note>
+  **Wisp v2 is the default.** `ClientConnection` requests v2 by advertising the `wisp-v2` WebSocket subprotocol during the handshake and sending an `INFO` packet to negotiate extensions (UDP, MOTD). If the server does not respond with v2 framing, the client closes the WebSocket and reconnects using v1 automatically — no configuration needed on your part.
+</Note>

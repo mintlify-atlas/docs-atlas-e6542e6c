@@ -1,0 +1,179 @@
+---
+title: "Wisp Packet Types and Binary Format"
+sidebarTitle: "Packet Types"
+description: "Reference for all five Wisp packet types — CONNECT, DATA, CONTINUE, CLOSE, INFO — their binary layouts, type bytes, and usage in stream management."
+---
+
+Every message exchanged over a Wisp WebSocket connection is a binary frame containing a fixed 5-byte header followed by a type-specific payload. Packets are parsed by `WispPacket.parse_all()`, which reads the header, looks up the correct payload class in `packet_classes`, validates the minimum payload size, and delegates to the class's `parse()` method.
+
+---
+
+## Packet Header
+
+The first 5 bytes of every packet form the header:
+
+| Offset | Size | Type | Field | Description |
+|--------|------|------|-------|-------------|
+| 0 | 1 byte | `uint8` | `type` | Packet type identifier (see below) |
+| 1–4 | 4 bytes | `uint32` LE | `stream_id` | Identifies the logical stream; `0` is reserved for control messages |
+
+Everything after byte 4 is the payload, whose structure depends on `type`.
+
+---
+
+## Packet Types
+
+### CONNECT — `0x01`
+
+**Direction:** Client → Server
+
+Sent by the client to request a new proxied stream to a remote host. The `stream_id` in the header is the client-assigned identifier for this stream (starts at `1` and increments).
+
+<ParamField body="stream_type" type="uint8" required>
+  Protocol for the stream. `0x01` = TCP, `0x02` = UDP.
+</ParamField>
+
+<ParamField body="port" type="uint16 LE" required>
+  Destination port number (2 bytes, little-endian).
+</ParamField>
+
+<ParamField body="hostname" type="UTF-8 string" required>
+  Variable-length UTF-8 string naming the target host. There is no length prefix; the hostname consumes the remainder of the payload (all bytes from offset 3 onward).
+</ParamField>
+
+**Minimum payload size:** 3 bytes (stream_type + port; a zero-length hostname is technically valid).
+
+**Binary layout:**
+
+```
+[stream_type: 1] [port: 2 LE] [hostname: variable UTF-8]
+```
+
+---
+
+### DATA — `0x02`
+
+**Direction:** Client ↔ Server (both directions)
+
+Carries raw payload bytes for a stream. The entire payload is the data — there is no length field or framing within the packet itself.
+
+<ParamField body="data" type="bytes" required>
+  Opaque binary data for the stream. Length is derived from the WebSocket frame size minus the 5-byte header.
+</ParamField>
+
+**Minimum payload size:** 0 bytes (zero-length DATA frames are technically valid).
+
+**Binary layout:**
+
+```
+[data: variable bytes]
+```
+
+---
+
+### CONTINUE — `0x03`
+
+**Direction:** Server → Client
+
+Used for flow control. Tells the client how many more DATA packets it may send on the given stream before it must pause. The server sends the initial CONTINUE on `stream_id = 0` to communicate the global buffer size; subsequent CONTINUEs are per-stream.
+
+<ParamField body="buffer_remaining" type="uint32 LE" required>
+  The number of additional DATA packets the client is permitted to send on this stream without waiting. The server emits this after every `buffer_size / 2` packets forwarded, set to `buffer_size - current_queue_depth`.
+</ParamField>
+
+**Minimum payload size:** 4 bytes.
+
+**Binary layout:**
+
+```
+[buffer_remaining: 4 LE]
+```
+
+---
+
+### CLOSE — `0x04`
+
+**Direction:** Client ↔ Server (either side may initiate)
+
+Signals that a stream is being terminated. After sending or receiving a CLOSE, both sides should release resources for that `stream_id`. The one-byte `reason` code indicates why the stream was closed.
+
+<ParamField body="reason" type="uint8" required>
+  A numeric reason code. See the [Close Reasons](#close-reasons) table below for all defined values.
+</ParamField>
+
+**Minimum payload size:** 1 byte.
+
+**Binary layout:**
+
+```
+[reason: 1]
+```
+
+---
+
+### INFO — `0x05`
+
+**Direction:** Server → Client, then Client → Server (Wisp v2 only; always on `stream_id = 0`)
+
+Carries protocol version and extension data during the Wisp v2 handshake. The server sends INFO first; the client replies with INFO. Both packets have the same structure.
+
+<ParamField body="major_ver" type="uint8" required>
+  Major protocol version. `2` for Wisp v2.
+</ParamField>
+
+<ParamField body="minor_ver" type="uint8" required>
+  Minor protocol version. Currently `0`.
+</ParamField>
+
+<ParamField body="extensions" type="bytes" required>
+  Concatenated, serialized extension records. Each record has a 5-byte header (1-byte extension ID + 4-byte payload length LE) followed by the extension-specific payload. May be zero bytes if no extensions are offered.
+</ParamField>
+
+**Minimum payload size:** 2 bytes (major + minor; zero extensions is valid).
+
+**Binary layout:**
+
+```
+[major_ver: 1] [minor_ver: 1] [extensions: variable]
+```
+
+Each extension record within `extensions`:
+
+```
+[ext_id: 1] [payload_len: 4 LE] [ext_payload: payload_len bytes]
+```
+
+---
+
+## Close Reasons
+
+Close reason codes are defined in `close_reasons` in `packet.mjs`. Codes below `0x40` apply to both sides; `0x41`–`0x7f` are server-only; `0x80`–`0xbf` are client-only; `0xc0`+ are extension-specific.
+
+| Code | Name | Description | Applicable side |
+|------|------|-------------|-----------------|
+| `0x01` | `Unknown` | Unspecified or unknown error. | Both |
+| `0x02` | `Voluntary` | Stream closed normally (end of data). | Both |
+| `0x03` | `NetworkError` | A network-level I/O error occurred. | Both |
+| `0x04` | `IncompatibleExtensions` | The negotiated extension set is incompatible and the connection cannot continue. | Both |
+| `0x41` | `InvalidInfo` | The client sent a malformed or unexpected INFO packet during the v2 handshake. | Server |
+| `0x42` | `UnreachableHost` | The target hostname could not be reached. | Server |
+| `0x43` | `NoResponse` | The target host accepted the connection but sent no data within the timeout. | Server |
+| `0x44` | `ConnRefused` | The target host actively refused the connection. | Server |
+| `0x47` | `TransferTimeout` | The stream was idle for too long and timed out. | Server |
+| `0x48` | `HostBlocked` | The target hostname or IP is on the server's block list. | Server |
+| `0x49` | `ConnThrottled` | The connection was rate-limited or throttled by the server. | Server |
+| `0x81` | `ClientError` | A client-side error caused the stream to close. | Client |
+| `0xc0` | `AuthBadPassword` | Password Authentication extension: the supplied password was incorrect. | Extension |
+| `0xc1` | `AuthBadSignature` | Password Authentication extension: the credential signature was invalid. | Extension |
+| `0xc2` | `AuthMissingCredentials` | Password Authentication extension: no credentials were provided. | Extension |
+
+---
+
+## Stream Types
+
+The `stream_type` field of a CONNECT packet selects the transport protocol:
+
+| Value | Name | Description |
+|-------|------|-------------|
+| `0x01` | `TCP` | Reliable, ordered byte stream. |
+| `0x02` | `UDP` | Unreliable, unordered datagrams. Requires the `UDPExtension` to be negotiated in Wisp v2. |

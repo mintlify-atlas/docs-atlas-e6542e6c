@@ -1,0 +1,196 @@
+---
+title: "Using the Wisp Client in Browser Applications"
+sidebarTitle: "Usage"
+description: "Connect to a Wisp server from a browser using ClientConnection, open TCP and UDP streams, and handle incoming data with event callbacks."
+---
+
+The Wisp client lets browser applications open multiplexed TCP and UDP streams over a single WebSocket connection to a Wisp server. All stream management, flow control, and protocol negotiation are handled automatically — your code only needs to open a connection, create streams, and react to incoming data.
+
+## Importing the Client
+
+Import the top-level `client` namespace or individual classes directly from the `/client` entry-point:
+
+```js
+// Named namespace import
+import { client } from '@mercuryworkshop/wisp-js/client';
+
+// Or import individual classes directly
+import { ClientConnection } from '@mercuryworkshop/wisp-js/client';
+```
+
+## Creating a Connection
+
+Instantiate `ClientConnection` with the URL of your Wisp server and an optional options object:
+
+```js
+const connection = new ClientConnection('wss://wisp.example.com/wisp/', {
+  wisp_version: 2,
+  wisp_extensions: null, // auto-populated when wisp_version is 2
+});
+
+connection.onopen  = () => console.log('Wisp connection ready');
+connection.onclose = () => console.log('Wisp connection closed');
+connection.onerror = () => console.error('Wisp connection error');
+```
+
+### Constructor Arguments
+
+| Argument | Type | Description |
+|---|---|---|
+| `wisp_url` | `string` | Full WebSocket URL of the Wisp endpoint. **Must end with a trailing `/`**, or a `TypeError` is thrown. |
+| `options.wisp_version` | `number` | Protocol version to negotiate. Defaults to `2`. Falls back to `1` automatically if the server does not support v2. |
+| `options.wisp_extensions` | `Array \| null` | Extensions to advertise during the Wisp v2 handshake. When `null` and `wisp_version` is `2`, the client automatically adds `UDPExtension` and `MOTDExtension`. |
+
+### Connection Callbacks
+
+Assign these properties before or immediately after constructing — they are called on the corresponding lifecycle events:
+
+| Callback | When it fires |
+|---|---|
+| `onopen` | The server handshake completed and the connection is ready for streams. |
+| `onclose` | The underlying WebSocket closed. |
+| `onerror` | An unrecoverable error occurred (only fires after all v2→v1 fallback attempts are exhausted). |
+
+## Opening a Stream
+
+Call `create_stream` on a ready `ClientConnection` to open a new multiplexed stream:
+
+```js
+const stream = connection.create_stream(hostname, port, type);
+```
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `hostname` | `string` | — | Remote hostname or IP address to connect to. |
+| `port` | `number` | — | Remote port number (1–65535). |
+| `type` | `string \| number` | `0x01` | Stream type. Use `'tcp'` / `0x01` for TCP, or `'udp'` / `0x02` for UDP. |
+
+`create_stream` returns a `ClientStream` object immediately — the CONNECT packet is sent to the server right away, but the remote TCP connection may not be established yet.
+
+## Stream Events
+
+Set handlers on the returned stream before or just after calling `create_stream`:
+
+```js
+const stream = connection.create_stream('example.com', 80);
+
+stream.onopen = () => {
+  // Fires after the first CONTINUE packet is received from the server,
+  // confirming the remote connection is established and data can flow.
+  console.log('Stream open, buffer size:', stream.buffer_size);
+};
+
+stream.onmessage = (data) => {
+  // data is a Uint8Array containing the raw bytes from the server.
+  console.log('Received', data.byteLength, 'bytes');
+};
+
+stream.onclose = (reason) => {
+  // reason is a numeric close-reason code (see packet.mjs close_reasons).
+  console.log('Stream closed, reason:', reason);
+};
+```
+
+## Sending Data
+
+Send a `Uint8Array` of bytes over the stream:
+
+```js
+const payload = new TextEncoder().encode('Hello, server!');
+stream.send(payload);
+```
+
+`send` is flow-controlled for TCP streams. If the server's receive buffer is full (`buffer_size` reaches zero), the data is queued in `stream.send_buffer` and flushed automatically once the server sends a CONTINUE packet. UDP streams bypass this check and send immediately.
+
+## Closing a Stream or Connection
+
+```js
+// Close a single stream with a reason code (default 0x01 = Unknown)
+stream.close(0x02); // 0x02 = Voluntary close
+
+// Close the entire Wisp connection (and all active streams)
+connection.close();
+```
+
+Close reason codes are defined in `packet.mjs` as `close_reasons`. Common values:
+
+| Code | Name | Direction |
+|---|---|---|
+| `0x01` | `Unknown` | Client or server |
+| `0x02` | `Voluntary` | Client or server |
+| `0x03` | `NetworkError` | Client or server |
+
+## Connection Properties
+
+After `onopen` fires, the following properties are populated:
+
+| Property | Type | Description |
+|---|---|---|
+| `connection.connected` | `boolean` | `true` once the initial server handshake is complete. |
+| `connection.connecting` | `boolean` | `true` while the WebSocket is open but the first message has not yet been received. |
+| `connection.server_motd` | `string \| null` | Message-of-the-day from the server (requires `MOTDExtension`, Wisp v2 only). |
+| `connection.udp_enabled` | `boolean` | `true` if the server advertised `UDPExtension` support. Defaults to `true` until the INFO exchange determines otherwise. |
+| `connection.active_streams` | `object` | Map of `stream_id → ClientStream` for every currently open stream. |
+
+## Flow Control
+
+Each `ClientStream` tracks the server's receive buffer via `stream.buffer_size`:
+
+- On creation, `buffer_size` is set to `connection.max_buffer_size` (reported in the initial CONTINUE on stream 0).
+- Every call to `stream.send()` decrements `buffer_size` by 1.
+- When `buffer_size` reaches `0`, subsequent `send()` calls push data onto `stream.send_buffer` instead of transmitting immediately.
+- When the server sends a CONTINUE packet for the stream, `buffer_size` is reset to the new `buffer_remaining` value and buffered messages are flushed in order.
+
+You can inspect the pending queue at any time:
+
+```js
+console.log(`${stream.send_buffer.length} messages awaiting buffer space`);
+```
+
+UDP streams are exempt from flow control: `send()` always transmits immediately regardless of `buffer_size`.
+
+## Complete Example: HTTP GET over Wisp
+
+The following example opens a Wisp connection, creates a TCP stream to a web server, sends a minimal HTTP/1.0 GET request, and prints the response:
+
+```js
+import { ClientConnection } from '@mercuryworkshop/wisp-js/client';
+
+const connection = new ClientConnection('wss://wisp.example.com/wisp/');
+
+connection.onopen = () => {
+  const stream = connection.create_stream('neverssl.com', 80);
+
+  stream.onopen = () => {
+    const request = [
+      'GET / HTTP/1.0',
+      'Host: neverssl.com',
+      'Connection: close',
+      '',
+      '',
+    ].join('\r\n');
+
+    stream.send(new TextEncoder().encode(request));
+  };
+
+  const chunks = [];
+
+  stream.onmessage = (data) => {
+    chunks.push(data);
+  };
+
+  stream.onclose = (reason) => {
+    const decoder = new TextDecoder();
+    const body = chunks.map((c) => decoder.decode(c)).join('');
+
+    // Print the HTTP status line
+    console.log(body.split('\r\n')[0]); // e.g. "HTTP/1.0 200 OK"
+
+    connection.close();
+  };
+};
+
+connection.onerror = () => {
+  console.error('Could not connect to Wisp server');
+};
+```

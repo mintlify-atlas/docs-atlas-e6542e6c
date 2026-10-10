@@ -1,0 +1,125 @@
+---
+title: "Deploy Wisp to Render"
+sidebarTitle: "Render"
+description: "Deploy a Wisp server to Render using the included render.yaml configuration — runtime Node.js, free plan, with automatic deploys on push."
+---
+
+The `plutonium-net/wisp` repository ships with a `render.yaml` Infrastructure-as-Code file that lets you deploy a fully-configured Wisp server to [Render](https://render.com) in minutes. Render natively supports WebSocket upgrades on all Web Service plans, so no extra gateway or proxy configuration is needed.
+
+<Warning>
+  The Plutonium Network license restricts this software to **testing and
+  non-production use only**. You must obtain prior written authorization from
+  Plutonium Network before serving real, live-user traffic. Review the full
+  license terms (returned by the server's HTTP status page) before deploying.
+</Warning>
+
+---
+
+## render.yaml Walkthrough
+
+The repository's `render.yaml` defines a single Web Service:
+
+```yaml render.yaml
+services:
+  - type: web
+    name: wisp
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node ./src/bin/server_cli.mjs -H 0.0.0.0 -P $PORT
+    autoDeploy: true
+```
+
+| Field          | Value                                              | Notes                                                                                                                                                   |
+| -------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`         | `web`                                              | Deploys as a Render Web Service — exposes an HTTPS endpoint and handles WebSocket upgrades automatically.                                               |
+| `name`         | `wisp`                                             | The display name shown in the Render dashboard. You can change this without affecting behaviour.                                                        |
+| `runtime`      | `node`                                             | Render uses the Node.js runtime. The version is inferred from your `package.json` `engines` field or Render's default; pin a version with a `.node-version` file if needed. |
+| `plan`         | `free`                                             | Uses the Render free tier. See the note below regarding cold-start delays on free instances.                                                            |
+| `buildCommand` | `npm install`                                      | Installs production and development dependencies before the service starts.                                                                             |
+| `startCommand` | `node ./src/bin/server_cli.mjs -H 0.0.0.0 -P $PORT` | Starts the Wisp server, binding to all interfaces (`0.0.0.0`) on the port Render assigns at runtime via `$PORT`.                                       |
+| `autoDeploy`   | `true`                                             | Render automatically re-deploys the service whenever a new commit is pushed to the connected branch.                                                    |
+
+---
+
+## Steps to Deploy
+
+<Steps>
+  <Step title="Fork or clone the repository">
+    Fork `plutonium-net/wisp` into your own GitHub (or GitLab) account, or
+    push a copy to a repository you control. Render needs read access to the
+    repository to trigger builds.
+
+    ```bash
+    git clone https://github.com/plutonium-net/wisp.git
+    cd wisp
+    # push to your own remote…
+    ```
+  </Step>
+
+  <Step title="Create a new Web Service on Render">
+    Log in to [render.com](https://render.com) and click **New → Web Service**.
+    When prompted to connect a repository, select the fork or copy you created
+    in the previous step and grant Render the necessary repository permissions.
+  </Step>
+
+  <Step title="Review the auto-detected settings">
+    Render automatically detects the `render.yaml` file at the repository root
+    and pre-populates all settings — runtime, build command, start command, and
+    plan. Review each field in the Render dashboard before proceeding. You can
+    override any value here without editing the file (dashboard values take
+    precedence).
+  </Step>
+
+  <Step title="Deploy">
+    Click **Create Web Service**. Render will:
+
+    1. Clone the repository.
+    2. Run `npm install` (the build command).
+    3. Start the server with `node ./src/bin/server_cli.mjs -H 0.0.0.0 -P $PORT`.
+
+    The `$PORT` environment variable is injected automatically by Render — the
+    server reads it at startup and there is nothing extra for you to configure.
+    Once the deploy completes, your Wisp endpoint is reachable at the `.onrender.com`
+    URL shown in the dashboard.
+  </Step>
+</Steps>
+
+---
+
+## Environment Variables
+
+Render exposes an **Environment** tab in the service dashboard where you can add, edit, or delete variables.
+
+| Variable   | Set by   | Description                                                                                                                         |
+| ---------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `PORT`     | Render   | Injected automatically. The server reads this to determine which port to bind. **Do not set this manually** — Render manages it.    |
+| `LOCATION` | You      | Optional. When set, the value is included in the plain-text HTTP status response: `"…is online and serving the <LOCATION> region."` Set this to a region label (e.g. `us-oregon`) so you can identify which node handled a request when running multiple deployments. |
+
+---
+
+## WebSocket Support
+
+Render Web Services support WebSocket upgrade requests natively on all plans — no additional configuration, reverse-proxy rules, or custom headers are required. The `server_cli.mjs` binary hooks directly into Node's `http.Server` `upgrade` event and routes upgrade requests to the Wisp handler, which is fully compatible with Render's infrastructure out of the box.
+
+---
+
+## Custom Domain
+
+To serve Wisp from your own domain instead of the default `.onrender.com` address:
+
+1. Open your Web Service in the Render dashboard.
+2. Navigate to **Settings → Custom Domains**.
+3. Add your domain and follow the DNS verification instructions Render provides.
+
+Render provisions a TLS certificate automatically via Let's Encrypt — no manual certificate management needed.
+
+---
+
+<Note>
+  Free-tier Render Web Services **spin down after 15 minutes of inactivity**
+  and experience a cold-start delay (typically 30–60 seconds) on the first
+  request after sleeping. For any use case where latency on the first
+  connection matters, upgrade to a paid Render plan (Starter or higher) to
+  keep the service always-on.
+</Note>

@@ -1,20 +1,58 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "Wisp for Plutonium: WebSocket Proxy Protocol"
+sidebarTitle: "Home"
+description: "A JavaScript client and server for the Wisp protocol — multiplex TCP and UDP streams over a single WebSocket connection, customized for Plutonium Network."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+Wisp for Plutonium is a full JavaScript implementation of the [Wisp protocol](https://github.com/MercuryWorkshop/wisp-protocol), providing both a browser-compatible client and a Node.js server. It multiplexes many TCP and UDP streams over a single WebSocket connection, enabling proxying scenarios that would otherwise require one WebSocket per destination. This build is customized and operated by Plutonium Network.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get a Wisp server running and connect your first client stream in minutes.
+  </Card>
+  <Card title="Installation" icon="package" href="/installation">
+    Install the npm package and set up your project for server or browser use.
+  </Card>
+  <Card title="Protocol Overview" icon="network-wired" href="/concepts/protocol-overview">
+    Understand how Wisp multiplexes streams and negotiates protocol versions.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/server-connection">
+    Explore the full server, client, packet, and extension APIs.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## What is Wisp?
+
+Wisp is a lightweight binary protocol that lets a browser (or any WebSocket client) open multiple simultaneous TCP and UDP connections through a single WebSocket endpoint. Rather than requiring one WebSocket upgrade per destination host, all streams share one connection — reducing overhead and simplifying proxy infrastructure.
+
+<CardGroup cols={2}>
+  <Card title="Server Guide" icon="server" href="/server/setup">
+    Integrate the Wisp server into an existing Node.js HTTP server or deploy it standalone.
+  </Card>
+  <Card title="Client Guide" icon="browser" href="/client/usage">
+    Use `ClientConnection` or the drop-in `WispWebSocket` polyfill in browser applications.
+  </Card>
+  <Card title="Extensions" icon="puzzle-piece" href="/concepts/extensions">
+    Enable UDP streams, MOTD messages, and password authentication via the extension system.
+  </Card>
+  <Card title="Deployment" icon="cloud" href="/deployment/cli">
+    Run the standalone CLI server locally or deploy to Render with one click.
+  </Card>
+</CardGroup>
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Multiplexed Streams" icon="arrows-split-up-and-left">
+    Many TCP and UDP streams over one WebSocket — no per-destination handshake overhead.
+  </Card>
+  <Card title="Wisp v1 & v2" icon="code-branch">
+    Automatic version negotiation. Falls back gracefully when the server does not speak v2.
+  </Card>
+  <Card title="Built-in Filtering" icon="shield-halved">
+    Hostname/port allow-lists, IP range restrictions, and per-connection stream limits.
+  </Card>
+  <Card title="WsProxy Mode" icon="right-left">
+    Plain WebSocket-to-TCP proxying on non-Wisp paths — no framing protocol required.
+  </Card>
+</CardGroup>

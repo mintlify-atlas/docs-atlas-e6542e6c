@@ -1,0 +1,81 @@
+---
+title: "Wisp for Plutonium: WebSocket Multiplexing Protocol"
+sidebarTitle: "Introduction"
+description: "Wisp for Plutonium is a JavaScript implementation of the Wisp protocol that multiplexes TCP and UDP streams over WebSocket. Learn what it does and how it works."
+---
+
+Wisp for Plutonium is a JavaScript client and server library that implements the [Wisp protocol](https://github.com/MercuryWorkshop/wisp-protocol), enabling full TCP and UDP proxying over a single persistent WebSocket connection. It is published as [`@mercuryworkshop/wisp-js`](https://www.npmjs.com/package/@mercuryworkshop/wisp-js) and deployed by Plutonium Network with custom configuration and licensing. If you are building browser-based networked applications, game clients, or developer tooling that needs transparent TCP/UDP access through an HTTP endpoint, this library is the foundation you need.
+
+## The problem Wisp solves
+
+Standard browser environments cannot open raw TCP or UDP sockets — only WebSocket connections to specific origins. The Wisp protocol solves this by defining a lightweight framing layer that runs *on top of* a single WebSocket connection and multiplexes an arbitrary number of independent TCP and UDP streams through it. The client sends `CONNECT`, `DATA`, and `CLOSE` packets over one persistent WebSocket; the Wisp server on the other end opens real TCP/UDP sockets on behalf of the client and proxies traffic back and forth. From the application's perspective each stream behaves like a direct socket.
+
+## Plutonium Network context
+
+Plutonium's deployment of `@mercuryworkshop/wisp-js` is a customized build of the upstream MercuryWorkshop `wisp-js` library. It ships with Plutonium-specific server branding, the Plutonium Network WISP LICENSE (see below), and a pre-configured CLI server (`wisp-js-server`) that is used by Plutonium's infrastructure. The npm package exposes the same public API as the upstream library, so community tooling and browser clients built against the standard Wisp spec work without modification.
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Multiplexed streams" icon="arrows-split-up-and-left">
+    Open hundreds of independent TCP and UDP streams over a single WebSocket connection. Each stream has its own flow-control buffer managed with `CONTINUE` packets so fast streams never block slow ones.
+  </Card>
+  <Card title="Wisp v1 & v2 protocol" icon="code-branch">
+    Defaults to Wisp v2 (negotiated via the `wisp-v2` WebSocket subprotocol) with automatic fallback to v1 when the server does not support v2. No manual version pinning is required.
+  </Card>
+  <Card title="Server-side filtering" icon="shield-halved">
+    Built-in hostname and port allow/block lists, private IP blocking, loopback IP blocking, per-host and total stream count limits, and DNS TTL caching protect your proxy from misuse.
+  </Card>
+  <Card title="WsProxy mode" icon="plug">
+    Requests to non-Wisp paths (e.g. `/example.com:80`) are handled by `WSProxyConnection` as a plain WebSocket-to-TCP bridge, compatible with legacy wsproxy clients without any extra configuration.
+  </Card>
+  <Card title="WispWebSocket polyfill" icon="swap-arrows">
+    `WispWebSocket` is a drop-in replacement for the browser's native `WebSocket` class. Existing code that opens `new WebSocket('ws://host/example.com:80')` can be redirected through Wisp by swapping the constructor — no other changes needed.
+  </Card>
+  <Card title="Extension system" icon="puzzle-piece">
+    Wisp v2 supports negotiable extensions. The library ships with `UDPExtension` (enable UDP streams), `MOTDExtension` (server message of the day), and `PasswordAuthExtension` (credential-based auth), with a `BaseExtension` class for custom extensions.
+  </Card>
+</CardGroup>
+
+## How it fits together
+
+```
+Browser / Node.js client                   Wisp server (Node.js)
+─────────────────────────────────────────────────────────────────
+ClientConnection('ws://host:5001/')  ──WS──▶  routeRequest()
+  │                                               │
+  ├─ create_stream('api.example.com', 443)   ServerConnection
+  │     DATA / CONTINUE / CLOSE packets  ◀──▶  TCP socket to api.example.com:443
+  │
+  └─ create_stream('game.example.com', 7777)
+        DATA / CONTINUE / CLOSE packets  ◀──▶  UDP socket to game.example.com:7777
+```
+
+1. **Client connects** — `ClientConnection` opens one WebSocket to the Wisp server endpoint (URL must end with `/`). During the handshake it negotiates the protocol version and any v2 extensions.
+2. **Streams are opened** — `create_stream(hostname, port, type)` sends a `CONNECT` packet. The server resolves the hostname, applies filtering rules, and opens the underlying TCP or UDP socket.
+3. **Data flows** — `stream.send(data)` sends a `DATA` packet. Incoming data arrives on `stream.onmessage`. Flow control is handled automatically via `CONTINUE` packets so the client never overwhelms the server buffer.
+4. **Server proxies traffic** — `routeRequest` is called from your HTTP server's `upgrade` event. Paths ending in `/` are handled as Wisp connections; all other paths fall through to WsProxy mode.
+
+For a full API walkthrough see the [Client Usage](/client/usage) and [Server Setup](/server/setup) guides.
+
+## Getting started
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Stand up a server and open your first stream in under five minutes.
+  </Card>
+  <Card title="Installation" icon="box" href="/installation">
+    Package install options, import paths, CJS builds, and browser bundling.
+  </Card>
+  <Card title="Protocol overview" icon="diagram-project" href="/concepts/protocol-overview">
+    Deep dive into the Wisp packet format, stream lifecycle, and v2 extension negotiation.
+  </Card>
+  <Card title="Server setup" icon="server" href="/server/setup">
+    Configure filtering, DNS, logging, and deploy with the built-in CLI.
+  </Card>
+</CardGroup>
+
+<Note>
+  **Licensing restriction — read before deploying.**
+  This software is distributed under the **Plutonium Network WISP LICENSE**. It is made available strictly for testing and non-production purposes. You may use, modify, and inspect the software in development, staging, or experimental environments only. Using it to serve live production traffic — or in any environment where real end-users depend on it for active, operational services — is expressly prohibited without **prior written authorization from Plutonium Network**. See the `LICENSE` file in the repository for the complete terms.
+</Note>

@@ -1,0 +1,129 @@
+---
+title: "Installing @mercuryworkshop/wisp-js"
+sidebarTitle: "Installation"
+description: "Install the wisp-js npm package for server-side Node.js use or browser-side bundling, with CommonJS and ESM export options."
+---
+
+`@mercuryworkshop/wisp-js` is a dual-environment package. The **server entrypoint** runs on Node.js and uses the built-in `net` and `dgram` modules to open real TCP and UDP sockets on behalf of Wisp clients. The **client entrypoint** is browser-friendly and has no Node.js dependencies, making it safe to bundle with webpack, Vite, or any other modern bundler. Both environments share the same packet and extension modules.
+
+## Package installation
+
+<CodeGroup>
+  ```bash npm
+  npm install @mercuryworkshop/wisp-js
+  ```
+
+  ```bash yarn
+  yarn add @mercuryworkshop/wisp-js
+  ```
+
+  ```bash pnpm
+  pnpm add @mercuryworkshop/wisp-js
+  ```
+</CodeGroup>
+
+The package ships with both ESM source files (`src/`) and pre-built CommonJS bundles (`dist/`), so no build step is required for typical use.
+
+## Import paths
+
+The package exposes three named export entrypoints defined in `package.json`:
+
+| Specifier | Contents | Typical use |
+|---|---|---|
+| `@mercuryworkshop/wisp-js` | client + server + packet + extensions | Full access in Node.js |
+| `@mercuryworkshop/wisp-js/client` | client + packet + extensions | Browser / bundler |
+| `@mercuryworkshop/wisp-js/server` | server + packet + logging + extensions | Node.js server only |
+
+### Full package
+
+```js
+import { client, server, packet, extensions } from "@mercuryworkshop/wisp-js";
+
+// Client
+const { ClientConnection, WispWebSocket } = client;
+
+// Server
+const { routeRequest, options } = server;
+```
+
+### Client only (browser-friendly)
+
+```js
+import { client, packet, extensions } from "@mercuryworkshop/wisp-js/client";
+
+const { ClientConnection, WispWebSocket } = client;
+```
+
+### Server only (Node.js)
+
+```js
+import { server, logging, packet, extensions } from "@mercuryworkshop/wisp-js/server";
+
+const { routeRequest, options, ServerConnection } = server;
+
+// Set the log level before starting the server.
+logging.set_level(logging.INFO);
+```
+
+## CommonJS
+
+Pre-built CommonJS bundles are included in the `dist/` directory for environments that cannot use ESM `import` syntax:
+
+| Bundle file | Entrypoint |
+|---|---|
+| `dist/wisp-full.cjs` | Full package (client + server) |
+| `dist/wisp-client.cjs` | Client only |
+| `dist/wisp-server.cjs` | Server only |
+
+The `exports` field in `package.json` maps each entrypoint's `require()` condition to the appropriate bundle, so you can use the standard specifiers with `require` in CommonJS projects:
+
+```js
+// Node.js CommonJS
+const { client, server } = require("@mercuryworkshop/wisp-js");
+const { client: clientOnly } = require("@mercuryworkshop/wisp-js/client");
+const { server: serverOnly } = require("@mercuryworkshop/wisp-js/server");
+```
+
+The CJS bundles are regenerated automatically during `npm pack` via the `prepack` script (`npm run build:prod`). If you are working from a fresh clone without a `dist/` directory, run the build step below first.
+
+## Browser bundling
+
+When you bundle the client with webpack or Vite, the `browser` field in `package.json` automatically replaces the Node.js compatibility shim (`src/compat.mjs`) with a browser-safe equivalent (`src/compat_browser.mjs`). This swap happens transparently — `compat_browser.mjs` provides the same `WebSocket` and `WebSocketServer` surface using the browser's native `WebSocket` global instead of the `ws` npm package.
+
+No extra bundler configuration is needed. Simply import from `@mercuryworkshop/wisp-js/client` and let your bundler resolve the correct compat file:
+
+```js
+// webpack / Vite / Rollup — the browser field handles the shim swap.
+import { client } from "@mercuryworkshop/wisp-js/client";
+```
+
+<Warning>
+  Never import `@mercuryworkshop/wisp-js/server` or `@mercuryworkshop/wisp-js` (the full package) in browser code. The server entrypoint imports Node.js built-in modules (`node:net`, `node:dgram`) that do not exist in a browser environment and will cause bundler errors or runtime crashes. Always use the `/client` specifier for browser-side code.
+</Warning>
+
+## Build from source
+
+If you need to regenerate the `dist/` CJS bundles from the ESM source files (for example after cloning the repository or modifying the source), use the npm scripts defined in `package.json`:
+
+```bash
+# Development build (unminified, faster)
+npm run build
+
+# Production build (minified, used by npm pack)
+npm run build:prod
+```
+
+Both commands invoke webpack with the configuration in `webpack.config.js`. The output files are written to `dist/`:
+
+```
+dist/
+  wisp-full.cjs
+  wisp-client.cjs
+  wisp-server.cjs
+```
+
+You can also watch for changes during development:
+
+```bash
+npm run dev
+```

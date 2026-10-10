@@ -1,0 +1,142 @@
+---
+title: "WSProxyConnection API Reference"
+sidebarTitle: "WSProxyConnection"
+description: "API reference for WSProxyConnection — the Wisp server component that proxies a single TCP connection over WebSocket without the Wisp framing protocol."
+---
+
+`WSProxyConnection` handles the WsProxy sub-protocol: a simplified mode where a single TCP connection is tunnelled directly over a WebSocket without any Wisp framing. Instead of multiplexing many streams over one socket, each WsProxy WebSocket connection carries exactly one TCP stream. The destination host and port are encoded in the URL path itself rather than in a `CONNECT` packet.
+
+`WSProxyConnection` is created automatically by `routeRequest` when the incoming request URL does **not** end with `/`. You can also instantiate it directly if you need lower-level control.
+
+## `WSProxyConnection` Class
+
+### Constructor
+
+```js
+new WSProxyConnection(ws, path)
+```
+
+Parses the destination hostname and port from the URL path and wraps the WebSocket in an `AsyncWebSocket`. The socket is **not** opened yet — call `setup()` to initiate the TCP connection.
+
+The path segment parsing uses the last segment of the URL path and splits it on `:` to separate the hostname from the port:
+
+```
+/wisp/example.com:443   →  hostname = "example.com", port = 443
+/wsproxy/10.0.0.1:80    →  hostname = "10.0.0.1",    port = 80
+```
+
+<ParamField path="ws" type="WebSocket" required>
+  A raw WebSocket object that has been upgraded from an HTTP request. Wrapped internally in an `AsyncWebSocket`.
+</ParamField>
+
+<ParamField path="path" type="string" required>
+  The full URL path from the HTTP upgrade request. The last path segment must be in the form `hostname:port`. For example `/proxy/api.example.com:443`.
+</ParamField>
+
+### Properties
+
+<ParamField path="hostname" type="string">
+  The destination hostname parsed from the URL path, trimmed of whitespace.
+</ParamField>
+
+<ParamField path="port" type="number">
+  The destination port number parsed from the URL path.
+</ParamField>
+
+<ParamField path="ws" type="AsyncWebSocket">
+  The `AsyncWebSocket` wrapper providing async `send()`, `recv()`, and `close()` over the underlying WebSocket.
+</ParamField>
+
+<ParamField path="socket" type="NodeTCPSocket">
+  The outbound TCP socket to the destination host. Only available after `setup()` has resolved successfully; `undefined` before that point.
+</ParamField>
+
+### Methods
+
+#### `setup()`
+
+```js
+await proxy.setup()
+```
+
+Connects the WebSocket, enforces access controls, opens the outbound TCP connection, and starts the bidirectional data bridge. Specifically:
+
+1. **Connects the WebSocket** — calls `ws.connect()` to attach event listeners.
+2. **Checks access controls** — calls `filter.is_stream_allowed(null, stream_types.TCP, hostname, port)`. If the destination is blocked, closes the WebSocket and throws `AccessDeniedError`.
+3. **Connects the TCP socket** — creates a `NodeTCPSocket` for `hostname:port` and calls `socket.connect()`.
+4. **Starts proxy tasks** — launches `tcp_to_ws()` and `ws_to_tcp()` as background promises. Errors in either task are caught and logged.
+
+**Returns:** `Promise<void>` — resolves once the TCP connection is established and both proxy tasks are running.
+
+**Throws:** `AccessDeniedError` if the destination is blocked by the server's filter rules.
+
+#### `tcp_to_ws()` (internal)
+
+```js
+// started automatically by setup()
+```
+
+Reads raw bytes from the TCP socket in a loop and writes them directly to the WebSocket as binary frames. Pauses the socket while a send is in progress to apply backpressure. When the TCP socket closes (`recv()` returns `null`), closes the WebSocket.
+
+**Returns:** `Promise<void>`
+
+#### `ws_to_tcp()` (internal)
+
+```js
+// started automatically by setup()
+```
+
+Reads binary frames from the WebSocket in a loop and writes them directly to the TCP socket. When the WebSocket closes (`recv()` returns `null`), closes the TCP socket.
+
+**Returns:** `Promise<void>`
+
+---
+
+## Error Handling
+
+`WSProxyConnection` uses `AccessDeniedError` (from `filter.mjs`) to signal that the requested destination is not permitted. This error is thrown from `setup()` when `filter.is_stream_allowed()` returns a non-zero close reason.
+
+`routeRequest` catches both `AccessDeniedError` and `HandshakeError` silently:
+
+```js
+// from http.mjs — simplified
+try {
+  if (path.endsWith("/")) {
+    const conn = new ServerConnection(ws, path, conn_options);
+    await conn.setup();
+    await conn.run();
+  } else {
+    const proxy = new WSProxyConnection(ws, path);
+    await proxy.setup();
+  }
+} catch (error) {
+  ws.close();
+  if (error instanceof HandshakeError) return;     // ignored
+  if (error instanceof AccessDeniedError) return;  // ignored
+  logging.error("Uncaught server error:\n" + (error.stack || error));
+}
+```
+
+Any access-denied rejection is therefore handled without producing an error log entry — only a filtered `info`-level message from within `setup()` itself.
+
+---
+
+## Routing: `WSProxyConnection` vs `ServerConnection`
+
+`routeRequest` routes incoming WebSocket upgrades based on a single rule: whether the URL path ends with `/`.
+
+```js
+// Path ending with "/" → full Wisp multiplexed connection
+// GET /wisp/ HTTP/1.1  →  new ServerConnection(ws, "/wisp/", conn_options)
+
+// Path NOT ending with "/" → single-stream WsProxy connection
+// GET /wisp/example.com:443  →  new WSProxyConnection(ws, "/wisp/example.com:443")
+```
+
+This means a client can use both protocols on the same server and port: Wisp streams go to `/wisp/` while raw TCP proxying goes to `/wisp/hostname:port`.
+
+---
+
+<Note>
+  `WSProxyConnection` only supports TCP streams. It always creates a `NodeTCPSocket` regardless of the path contents. If you need UDP proxying, use the full Wisp protocol via `ServerConnection`, which handles both `stream_types.TCP` and `stream_types.UDP`.
+</Note>

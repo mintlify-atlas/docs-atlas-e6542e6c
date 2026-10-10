@@ -1,0 +1,100 @@
+---
+title: "Wisp Protocol: Multiplexed WebSocket Streams"
+sidebarTitle: "Protocol Overview"
+description: "How the Wisp protocol multiplexes TCP and UDP streams over a single WebSocket connection, including v1 vs v2 handshake differences and stream lifecycle."
+---
+
+The Wisp protocol lets a single WebSocket connection carry many independent TCP and UDP streams simultaneously. Instead of opening a new WebSocket for every proxied connection, the client opens one persistent WebSocket to a Wisp endpoint and then multiplexes as many logical streams as it needs over that pipe. Each stream is identified by a 32-bit `stream_id` and has its own flow-control counter, so the server can back-pressure fast senders without affecting other streams.
+
+## Connection Lifecycle
+
+Every Wisp session begins with the client opening a WebSocket to the server's Wisp endpoint. **The URL must end with a trailing forward slash (`/`)**; any URL that does not end with `/` is treated as a WsProxy request instead (see [WsProxy paths](#wsproxy-paths) below).
+
+### Wisp v2 Handshake
+
+When the client negotiates the `wisp-v2` WebSocket subprotocol, the following exchange takes place before any streams can be opened:
+
+<Steps>
+  <Step title="Server sends INFO (stream_id = 0)">
+    Immediately after accepting the WebSocket, the server transmits an INFO packet on stream&nbsp;0. The payload contains the server's protocol version (`major_ver = 2`, `minor_ver = 0`) followed by a serialized list of extensions the server supports — for example UDP or MOTD.
+  </Step>
+  <Step title="Client responds with INFO (stream_id = 0)">
+    Upon receiving the server's INFO packet, the client parses the offered extensions, computes the intersection with its own supported extensions, and replies with its own INFO packet carrying that intersection list. After sending its INFO the client marks `info_received = true`.
+  </Step>
+  <Step title="Server sends initial CONTINUE (stream_id = 0)">
+    After the INFO exchange, the server sends a CONTINUE packet on stream&nbsp;0 whose `buffer_remaining` field equals the server's maximum per-stream buffer size (128 by default). This tells the client how many DATA packets it may send before it must wait for per-stream CONTINUE updates.
+  </Step>
+  <Step title="Streams may now be opened">
+    The client records `max_buffer_size` from the stream-0 CONTINUE packet and sets `connected = true`. From this point on, `create_stream()` calls may proceed, and the `onopen` callback fires.
+  </Step>
+</Steps>
+
+### Wisp v1 Handshake
+
+In v1 there is no INFO exchange. The server simply sends the initial stream-0 CONTINUE packet immediately after the WebSocket is accepted, and the client starts opening streams as soon as it receives it.
+
+---
+
+## Stream Lifecycle
+
+### Opening a stream
+
+The client calls `create_stream(hostname, port, type)` which sends a **CONNECT** packet containing:
+
+- `stream_type` — `0x01` for TCP or `0x02` for UDP
+- `port` — the destination port (16-bit little-endian)
+- `hostname` — a UTF-8 string naming the target host
+
+The server receives the CONNECT packet, resolves the destination, and begins proxying. Each stream is tracked by a `stream_id` that increments from `1` for every new stream on the connection.
+
+### Transferring data
+
+Once a stream is open, either side may send **DATA** packets at any time. DATA packets carry an opaque binary payload — the raw bytes from the TCP or UDP socket. There is no framing within the payload; the consumer is responsible for interpreting the bytes.
+
+### Flow control via CONTINUE
+
+The Wisp protocol uses an explicit buffer credit scheme so a slow server cannot be overwhelmed by a fast client:
+
+- When the client receives the initial stream-0 CONTINUE, it stores `max_buffer_size` as the per-stream budget.
+- Each DATA packet the client sends decrements that budget by one.
+- When the budget reaches zero, new data is held in a local `send_buffer` rather than sent.
+- The server emits per-stream CONTINUE packets after flushing buffered data; each CONTINUE refreshes `buffer_remaining` and drains the client's local send buffer.
+
+The server sends a CONTINUE after every `buffer_size / 2` packets forwarded, carrying the current `buffer_size - queue_depth` value.
+
+### Closing a stream
+
+Either side may close a stream by sending a **CLOSE** packet with a one-byte reason code. On the server side the stream's resources (socket, send queue) are released. On the client side the stream's `onclose` callback fires with the reason code and the stream is removed from `active_streams`.
+
+---
+
+## Wisp v1 vs v2
+
+| Feature | v1 | v2 |
+|---|---|---|
+| WebSocket subprotocol | *(none)* | `wisp-v2` |
+| INFO/INFO handshake | ✗ | ✓ |
+| Extension negotiation | ✗ | ✓ |
+| UDP streams | Optional (server decides) | Via `UDPExtension` |
+| Server MOTD | ✗ | Via `MOTDExtension` |
+| Password auth | ✗ | Via `PasswordAuthExtension` |
+
+### Auto-detection and fallback
+
+The client always tries v2 first by requesting the `wisp-v2` WebSocket subprotocol. If the server does not speak v2 the WebSocket handshake fails with an error. The client's `onerror` handler intercepts this, resets `wisp_version` to `1`, clears the `onclose` listener to suppress the spurious close event, and immediately reconnects without a subprotocol. When the reconnected v1 session delivers its first packet (the stream-0 CONTINUE), the client detects that `info_received` is still `false` and confirms `wisp_version = 1`.
+
+---
+
+## WsProxy Paths
+
+If the WebSocket URL does **not** end with a trailing `/`, wisp-js treats the connection as a **WsProxy** session rather than a Wisp session. In WsProxy mode the URL path itself encodes the target `hostname:port`, and the WebSocket frames are raw TCP bytes with no Wisp framing layer. This mode is provided for compatibility with proxies that pre-date the Wisp protocol.
+
+The `ClientConnection` constructor enforces the trailing-slash rule and throws a `TypeError` immediately if the URL is missing it:
+
+```js
+// ✅ Valid Wisp endpoint
+const conn = new ClientConnection("wss://example.com/wisp/");
+
+// ❌ Throws TypeError: "wisp endpoints must end with a trailing forward slash"
+const conn = new ClientConnection("wss://example.com/wisp");
+```
