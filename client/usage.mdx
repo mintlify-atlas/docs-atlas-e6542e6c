@@ -1,21 +1,26 @@
 ---
-title: "Using the Wisp Client in Browser Applications"
+title: "Wisp Client: Connections and Streams in the Browser"
 sidebarTitle: "Usage"
-description: "Connect to a Wisp server from a browser using ClientConnection, open TCP and UDP streams, and handle incoming data with event callbacks."
+description: "Open a ClientConnection to a Wisp server, create multiplexed TCP and UDP streams, and handle incoming data with event callbacks in any browser app."
 ---
 
 The Wisp client lets browser applications open multiplexed TCP and UDP streams over a single WebSocket connection to a Wisp server. All stream management, flow control, and protocol negotiation are handled automatically — your code only needs to open a connection, create streams, and react to incoming data.
 
 ## Importing the Client
 
-Import the top-level `client` namespace or individual classes directly from the `/client` entry-point:
+The `@mercuryworkshop/wisp-js/client` entry-point re-exports three namespaces: `client`, `packet`, and `extensions`. Import the `client` namespace to access `ClientConnection`, `WispWebSocket`, and `_wisp_connections`:
 
 ```js
-// Named namespace import
 import { client } from '@mercuryworkshop/wisp-js/client';
+const { ClientConnection } = client;
+```
 
-// Or import individual classes directly
-import { ClientConnection } from '@mercuryworkshop/wisp-js/client';
+Or destructure the namespace directly at import time:
+
+```js
+import { client, extensions } from '@mercuryworkshop/wisp-js/client';
+const { ClientConnection } = client;
+const { UDPExtension, MOTDExtension } = extensions;
 ```
 
 ## Creating a Connection
@@ -23,6 +28,9 @@ import { ClientConnection } from '@mercuryworkshop/wisp-js/client';
 Instantiate `ClientConnection` with the URL of your Wisp server and an optional options object:
 
 ```js
+import { client } from '@mercuryworkshop/wisp-js/client';
+const { ClientConnection } = client;
+
 const connection = new ClientConnection('wss://wisp.example.com/wisp/', {
   wisp_version: 2,
   wisp_extensions: null, // auto-populated when wisp_version is 2
@@ -50,6 +58,7 @@ Assign these properties before or immediately after constructing — they are ca
 | `onopen` | The server handshake completed and the connection is ready for streams. |
 | `onclose` | The underlying WebSocket closed. |
 | `onerror` | An unrecoverable error occurred (only fires after all v2→v1 fallback attempts are exhausted). |
+| `onmessage` | Defined on the class but not invoked by the library internally. Available for custom use if you extend `ClientConnection`. |
 
 ## Opening a Stream
 
@@ -65,7 +74,11 @@ const stream = connection.create_stream(hostname, port, type);
 | `port` | `number` | — | Remote port number (1–65535). |
 | `type` | `string \| number` | `0x01` | Stream type. Use `'tcp'` / `0x01` for TCP, or `'udp'` / `0x02` for UDP. |
 
-`create_stream` returns a `ClientStream` object immediately — the CONNECT packet is sent to the server right away, but the remote TCP connection may not be established yet.
+`create_stream` returns a `ClientStream` object immediately — the CONNECT packet is sent to the server right away, but the remote TCP connection may not be established yet. The stream's `open` flag is set to `connection.connected` at creation time: if the connection handshake is not yet complete, `open` will be `false` initially, though data sent on TCP streams is still queued via the flow-control buffer.
+
+<Note>
+`create_stream` throws `Error: udp is not enabled for this wisp connection` if you request a UDP stream and the server did not advertise `UDPExtension` support. Check `connection.udp_enabled` before opening UDP streams when extension support is uncertain.
+</Note>
 
 ## Stream Events
 
@@ -74,22 +87,20 @@ Set handlers on the returned stream before or just after calling `create_stream`
 ```js
 const stream = connection.create_stream('example.com', 80);
 
-stream.onopen = () => {
-  // Fires after the first CONTINUE packet is received from the server,
-  // confirming the remote connection is established and data can flow.
-  console.log('Stream open, buffer size:', stream.buffer_size);
-};
-
 stream.onmessage = (data) => {
   // data is a Uint8Array containing the raw bytes from the server.
   console.log('Received', data.byteLength, 'bytes');
 };
 
 stream.onclose = (reason) => {
-  // reason is a numeric close-reason code (see packet.mjs close_reasons).
+  // reason is a numeric close-reason code (see close_reasons in packet.mjs).
   console.log('Stream closed, reason:', reason);
 };
 ```
+
+<Note>
+`ClientStream` exposes an `onopen` property but it is never invoked by the library. Do not rely on it to detect when the remote connection is established. Use `connection.onopen` to know when the Wisp handshake is complete before creating streams.
+</Note>
 
 ## Sending Data
 
@@ -100,7 +111,7 @@ const payload = new TextEncoder().encode('Hello, server!');
 stream.send(payload);
 ```
 
-`send` is flow-controlled for TCP streams. If the server's receive buffer is full (`buffer_size` reaches zero), the data is queued in `stream.send_buffer` and flushed automatically once the server sends a CONTINUE packet. UDP streams bypass this check and send immediately.
+`send` is flow-controlled for TCP streams. If the server's receive buffer is full (`buffer_size` reaches zero), the data is queued in `stream.send_buffer` and flushed automatically once the server sends a CONTINUE packet. UDP streams bypass this check and send immediately regardless of `buffer_size`.
 
 ## Closing a Stream or Connection
 
@@ -131,6 +142,7 @@ After `onopen` fires, the following properties are populated:
 | `connection.server_motd` | `string \| null` | Message-of-the-day from the server (requires `MOTDExtension`, Wisp v2 only). |
 | `connection.udp_enabled` | `boolean` | `true` if the server advertised `UDPExtension` support. Defaults to `true` until the INFO exchange determines otherwise. |
 | `connection.active_streams` | `object` | Map of `stream_id → ClientStream` for every currently open stream. |
+| `connection.max_buffer_size` | `number \| null` | Initial flow-control buffer size reported by the server during the handshake. `null` until the handshake completes. |
 
 ## Flow Control
 
@@ -154,24 +166,13 @@ UDP streams are exempt from flow control: `send()` always transmits immediately 
 The following example opens a Wisp connection, creates a TCP stream to a web server, sends a minimal HTTP/1.0 GET request, and prints the response:
 
 ```js
-import { ClientConnection } from '@mercuryworkshop/wisp-js/client';
+import { client } from '@mercuryworkshop/wisp-js/client';
+const { ClientConnection } = client;
 
 const connection = new ClientConnection('wss://wisp.example.com/wisp/');
 
 connection.onopen = () => {
   const stream = connection.create_stream('neverssl.com', 80);
-
-  stream.onopen = () => {
-    const request = [
-      'GET / HTTP/1.0',
-      'Host: neverssl.com',
-      'Connection: close',
-      '',
-      '',
-    ].join('\r\n');
-
-    stream.send(new TextEncoder().encode(request));
-  };
 
   const chunks = [];
 
@@ -188,6 +189,18 @@ connection.onopen = () => {
 
     connection.close();
   };
+
+  // Send the request immediately after creating the stream.
+  // TCP flow control ensures data is buffered if the server isn't ready yet.
+  const request = [
+    'GET / HTTP/1.0',
+    'Host: neverssl.com',
+    'Connection: close',
+    '',
+    '',
+  ].join('\r\n');
+
+  stream.send(new TextEncoder().encode(request));
 };
 
 connection.onerror = () => {

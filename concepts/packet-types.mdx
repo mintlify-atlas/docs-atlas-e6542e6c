@@ -1,7 +1,7 @@
 ---
-title: "Wisp Packet Types and Binary Format"
+title: "Wisp Packet Types: Binary Layout and Type Code Reference"
 sidebarTitle: "Packet Types"
-description: "Reference for all five Wisp packet types — CONNECT, DATA, CONTINUE, CLOSE, INFO — their binary layouts, type bytes, and usage in stream management."
+description: "Reference for all five Wisp packet types — CONNECT, DATA, CONTINUE, CLOSE, INFO — their binary layouts, type bytes, and stream management usage."
 ---
 
 Every message exchanged over a Wisp WebSocket connection is a binary frame containing a fixed 5-byte header followed by a type-specific payload. Packets are parsed by `WispPacket.parse_all()`, which reads the header, looks up the correct payload class in `packet_classes`, validates the minimum payload size, and delegates to the class's `parse()` method.

@@ -1,7 +1,7 @@
 ---
-title: "ClientConnection API Reference"
+title: "wisp-js ClientConnection and ClientStream API Reference"
 sidebarTitle: "ClientConnection"
-description: "API reference for ClientConnection — the browser-side class that opens a Wisp WebSocket, negotiates the protocol, and manages multiple TCP/UDP streams."
+description: "API reference for ClientConnection and ClientStream in wisp-js — manage Wisp WebSocket connections and multiplex TCP/UDP streams."
 ---
 
 `ClientConnection` is the core browser-side class in `@mercuryworkshop/wisp-js`. It opens a WebSocket to a Wisp server, performs the v2 or v1 handshake, and multiplexes any number of TCP or UDP `ClientStream` instances over that single connection. Import it from the `/client` entry-point:
@@ -17,7 +17,7 @@ import { ClientConnection } from '@mercuryworkshop/wisp-js/client';
 ### Constructor
 
 ```js
-new ClientConnection(wisp_url, options)
+new ClientConnection(wisp_url, { wisp_version, wisp_extensions } = {})
 ```
 
 Constructs a new `ClientConnection`, validates the URL, initialises internal state, optionally populates default extensions, and immediately calls `connect_ws()` to begin the WebSocket handshake.
@@ -27,14 +27,14 @@ Constructs a new `ClientConnection`, validates the URL, initialises internal sta
 </ParamField>
 
 <ParamField path="options" type="object">
-  Optional configuration object.
+  Optional destructured configuration object. The second argument is destructured as `{ wisp_version, wisp_extensions }` with a default of `{}`.
 
   <Expandable title="options fields">
-    <ParamField path="options.wisp_version" type="number" default={2}>
+    <ParamField path="wisp_version" type="number" default={2}>
       Wisp protocol version to request. Defaults to `2`. If the server rejects the v2 subprotocol the client automatically retries as v1.
     </ParamField>
-    <ParamField path="options.wisp_extensions" type="Array | null" default="null">
-      Array of extension instances to advertise during the Wisp v2 INFO handshake. When this is `null` **and** `wisp_version` is `2`, the client automatically adds `UDPExtension` and `MOTDExtension`.
+    <ParamField path="wisp_extensions" type="Array | null" default="null">
+      Array of extension instances to advertise during the Wisp v2 INFO handshake. When this is `null` **and** `wisp_version` is `2`, `add_extensions()` is called automatically, populating the array with `UDPExtension` and `MOTDExtension`.
     </ParamField>
   </Expandable>
 </ParamField>
@@ -52,7 +52,7 @@ Constructs a new `ClientConnection`, validates the URL, initialises internal sta
 </ResponseField>
 
 <ResponseField name="wisp_extensions" type="Array | null">
-  The array of extension instances that are advertised to the server. Populated automatically when `wisp_version` is `2` and no extensions were provided explicitly.
+  The array of extension instances that are advertised to the server. `null` until `add_extensions()` is called (or an explicit array is passed). Automatically populated with `UDPExtension` and `MOTDExtension` when `wisp_version` is `2` and no extensions were provided.
 </ResponseField>
 
 <ResponseField name="max_buffer_size" type="number | null">
@@ -88,7 +88,7 @@ Constructs a new `ClientConnection`, validates the URL, initialises internal sta
 </ResponseField>
 
 <ResponseField name="udp_enabled" type="boolean">
-  `true` if the server advertised `UDPExtension` support. Defaults to `true` on construction and is set to `false` when the INFO exchange completes without a UDP extension from the server (Wisp v2 only).
+  `true` if the server advertised `UDPExtension` support. Defaults to `true` on construction and is set based on the INFO exchange result (Wisp v2 only). Attempting to open a UDP stream when this is `false` throws an `Error`.
 </ResponseField>
 
 ---
@@ -98,7 +98,7 @@ Constructs a new `ClientConnection`, validates the URL, initialises internal sta
 These properties are plain function slots — assign them directly before or immediately after constructing the connection.
 
 <ResponseField name="onopen" type="() => void">
-  Called once the connection handshake succeeds and the connection is ready to create streams. This fires on the first inbound message from the server that sets `connected = true`.
+  Called once the connection handshake succeeds and the connection is ready to create streams. Fires on the first inbound message from the server after `connected` is set to `true`.
 </ResponseField>
 
 <ResponseField name="onclose" type="() => void">
@@ -106,11 +106,11 @@ These properties are plain function slots — assign them directly before or imm
 </ResponseField>
 
 <ResponseField name="onerror" type="() => void">
-  Called when an unrecoverable error occurs. When using Wisp v2, errors trigger an automatic v1 retry first — `onerror` only fires if both attempts fail.
+  Called when an unrecoverable error occurs. When using Wisp v2, a connection error triggers an automatic v1 retry first — `onerror` only fires if both attempts fail.
 </ResponseField>
 
 <ResponseField name="onmessage" type="() => void">
-  Reserved message callback. Not invoked by the current implementation (individual stream data is routed to `ClientStream.onmessage`).
+  Reserved callback slot. Not invoked by the library — individual stream data is routed to each `ClientStream`'s own `onmessage` handler.
 </ResponseField>
 
 ---
@@ -135,10 +135,14 @@ const udpStream = connection.create_stream('8.8.8.8', 53, 'udp');
 </ParamField>
 
 <ParamField path="type" type="number | string" default="0x01">
-  Stream type. Pass `0x01` or `'tcp'` for a TCP stream, or `0x02` or `'udp'` for a UDP stream. Throws an `Error` if `'udp'` is requested and `udp_enabled` is `false`.
+  Stream type. Pass `0x01` or `'tcp'` for a TCP stream, or `0x02` or `'udp'` for a UDP stream. Defaults to `0x01` (TCP). Throws an `Error` if `'udp'` is requested and `udp_enabled` is `false`.
 </ParamField>
 
 **Returns** a new `ClientStream` instance registered in `active_streams`.
+
+<Note>
+  When passing a string for `type`, both `'tcp'` and `'udp'` are recognized — any string other than `'udp'` is treated as TCP.
+</Note>
 
 ---
 
@@ -186,7 +190,7 @@ connection.cleanup();
 
 ## `ClientStream` class
 
-`ClientStream` is returned by `ClientConnection.create_stream()`. It represents a single multiplexed TCP or UDP stream. You do not instantiate it directly.
+`ClientStream` is returned by `ClientConnection.create_stream()`. It represents a single multiplexed TCP or UDP stream over the shared Wisp WebSocket. `ClientStream` is **not exported** from the module — you never instantiate it directly; always use `create_stream()`.
 
 ### Properties
 
@@ -215,7 +219,7 @@ connection.cleanup();
 </ResponseField>
 
 <ResponseField name="send_buffer" type="Array">
-  Queue of pending `Uint8Array` payloads waiting for buffer credit. Populated when `send()` is called with `buffer_size === 0` on a TCP stream. Drained automatically by `continue_received()`.
+  Queue of pending payloads waiting for flow-control credit. Populated when `send()` is called with `buffer_size === 0` on an open TCP stream. Drained automatically by `continue_received()`.
 </ResponseField>
 
 ---
@@ -223,11 +227,11 @@ connection.cleanup();
 ### Event callbacks
 
 <ResponseField name="onopen" type="() => void">
-  Called when the stream is first marked `open`. Assign this before the next event-loop tick.
+  A no-op stub initialized in the constructor. **This callback is never invoked by the library.** It exists as a placeholder for API compatibility — do not rely on it firing when the stream becomes open.
 </ResponseField>
 
 <ResponseField name="onclose" type="(reason: number) => void">
-  Called when the stream is closed. `reason` is a numeric code from `close_reasons` (e.g. `0x02` for a voluntary close).
+  Called when the stream is closed. `reason` is a numeric close-reason code (e.g. `0x01` for Unknown, `0x02` for Voluntary, `0x03` for NetworkError).
 </ResponseField>
 
 <ResponseField name="onmessage" type="(data: Uint8Array) => void">
@@ -240,7 +244,7 @@ connection.cleanup();
 
 #### `send(data)`
 
-Sends a DATA packet over the stream. For TCP streams, if `buffer_size` is zero the data is queued in `send_buffer` instead of being transmitted immediately. UDP streams always transmit immediately.
+Sends a DATA packet over the stream. For TCP streams, if `buffer_size` is `0` (and the stream is open) the data is queued in `send_buffer` instead of being transmitted immediately. Data is always sent immediately when: `buffer_size > 0`, the stream is not yet open, or the stream is UDP.
 
 <ParamField path="data" type="Uint8Array" required>
   Raw bytes to send.
@@ -253,7 +257,7 @@ Sends a DATA packet over the stream. For TCP streams, if `buffer_size` is zero t
 Sends a CLOSE packet to the server and marks the stream as closed. No-op if the stream is already closed.
 
 <ParamField path="reason" type="number" default="0x01">
-  Close reason code. Defaults to `0x01` (`Unknown`). Use `0x02` for a voluntary/clean close.
+  Close reason code. Defaults to `0x01` (Unknown). Use `0x02` for a voluntary/clean close.
 </ParamField>
 
 ---

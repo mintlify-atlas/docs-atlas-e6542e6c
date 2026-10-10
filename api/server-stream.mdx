@@ -1,7 +1,7 @@
 ---
-title: "WSProxyConnection API Reference"
+title: "WSProxyConnection WebSocket-to-TCP Proxy API Reference"
 sidebarTitle: "WSProxyConnection"
-description: "API reference for WSProxyConnection — the Wisp server component that proxies a single TCP connection over WebSocket without the Wisp framing protocol."
+description: "Reference for WSProxyConnection — a lightweight server class that tunnels one TCP connection over WebSocket without Wisp multiplexing or framing."
 ---
 
 `WSProxyConnection` handles the WsProxy sub-protocol: a simplified mode where a single TCP connection is tunnelled directly over a WebSocket without any Wisp framing. Instead of multiplexing many streams over one socket, each WsProxy WebSocket connection carries exactly one TCP stream. The destination host and port are encoded in the URL path itself rather than in a `CONNECT` packet.

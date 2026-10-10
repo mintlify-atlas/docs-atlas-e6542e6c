@@ -1,5 +1,5 @@
 ---
-title: "Wisp v2 Extension System"
+title: "Wisp v2 Extensions: UDP, Auth, MOTD, and Custom Types"
 sidebarTitle: "Extensions"
 description: "How Wisp v2 extensions work — including the built-in UDP, MOTD, and Password Authentication extensions — and how to build a custom extension."
 ---
@@ -140,6 +140,25 @@ Walks the raw `extensions` buffer from an INFO packet and constructs extension i
 
 - `valid_extensions` — the local list of supported extensions used as a lookup table.
 - `role` — `"server"` or `"client"`, selects which inner class (`Server` or `Client`) is used to parse each extension's payload.
+
+### `extensions_map`
+
+A plain object exported from `extensions.mjs` that maps each built-in extension ID to its class. Used internally by the protocol implementation and available for external introspection:
+
+```js
+import { extensions_map } from "@mercuryworkshop/wisp-js/extensions";
+
+// extensions_map shape:
+// {
+//   0x01: UDPExtension,
+//   0x02: PasswordAuthExtension,
+//   0x04: MOTDExtension
+// }
+
+const ExtClass = extensions_map[0x02]; // PasswordAuthExtension
+```
+
+---
 
 ### How `server_exts` / `client_exts` are built
 

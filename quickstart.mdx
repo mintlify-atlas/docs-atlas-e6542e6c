@@ -1,7 +1,7 @@
 ---
-title: "Get Started with Wisp for Plutonium"
+title: "Quickstart: Start a Wisp Server and Open Your First Stream"
 sidebarTitle: "Quickstart"
-description: "Stand up a Wisp server and connect your first client stream in under five minutes using @mercuryworkshop/wisp-js."
+description: "Install @mercuryworkshop/wisp-js, start a Node.js Wisp server, and open a multiplexed TCP stream from the browser in under five minutes."
 ---
 
 This guide walks you through installing `@mercuryworkshop/wisp-js`, starting a Wisp server in Node.js, and opening a multiplexed TCP stream from the browser. By the end you will have a working end-to-end Wisp connection and a clear mental model of how clients and servers interact.
@@ -71,7 +71,8 @@ This guide walks you through installing `@mercuryworkshop/wisp-js`, starting a W
     Import `ClientConnection` in your browser-side (or bundled) code. Pass the Wisp server WebSocket URL — it **must** end with a trailing `/`. Then call `create_stream` to open a multiplexed TCP stream to any reachable host.
 
     ```js client.js
-    import { ClientConnection } from "@mercuryworkshop/wisp-js/client";
+    import { client } from "@mercuryworkshop/wisp-js/client";
+    const { ClientConnection } = client;
 
     // Connect to the Wisp server. The URL must end with a trailing slash.
     const conn = new ClientConnection("ws://localhost:5001/");
@@ -141,7 +142,8 @@ This guide walks you through installing `@mercuryworkshop/wisp-js`, starting a W
   If your codebase already uses the native `WebSocket` API, you can proxy all connections through Wisp without rewriting your networking code. `WispWebSocket` implements the full DOM `WebSocket` interface and multiplexes streams over a shared `ClientConnection` automatically.
 
   ```js
-  import { WispWebSocket } from "@mercuryworkshop/wisp-js/client";
+  import { client } from "@mercuryworkshop/wisp-js/client";
+  const { WispWebSocket } = client;
 
   // URL format: <wisp-server-ws-url><hostname>:<port>
   // The trailing slash of the Wisp endpoint is replaced by host:port.

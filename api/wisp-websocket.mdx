@@ -1,10 +1,10 @@
 ---
-title: "WispWebSocket API Reference"
+title: "WispWebSocket API Reference — DOM WebSocket Polyfill"
 sidebarTitle: "WispWebSocket"
-description: "API reference for WispWebSocket — a DOM-compatible WebSocket polyfill that proxies connections through a Wisp server, sharing a single underlying WebSocket connection."
+description: "API reference for WispWebSocket — a DOM-compatible WebSocket polyfill that routes traffic through a Wisp proxy, sharing one ClientConnection per server."
 ---
 
-`WispWebSocket` is a drop-in replacement for the browser's native `WebSocket` that routes traffic through a Wisp proxy server. It implements the same DOM `WebSocket` interface — `readyState`, `send()`, `close()`, `onmessage`, and friends — while multiplexing all streams over a single shared `ClientConnection`. Because multiple `WispWebSocket` instances reuse one underlying connection (keyed by Wisp server URL), there is negligible overhead for opening many simultaneous proxied connections.
+`WispWebSocket` is a drop-in replacement for the browser's native `WebSocket` that routes traffic through a Wisp proxy server. It implements the same DOM `WebSocket` interface — `readyState`, `send()`, `close()`, `onmessage`, and friends — while multiplexing all streams over a single shared `ClientConnection`. Because multiple `WispWebSocket` instances reuse one underlying connection (keyed by Wisp server URL), there is negligible overhead for opening many simultaneous proxied connections. `WispWebSocket` extends `EventTarget`, so both legacy `on*` handler properties and `addEventListener` work.
 
 ```js
 import { WispWebSocket, _wisp_connections } from '@mercuryworkshop/wisp-js/client';
@@ -25,7 +25,7 @@ new WispWebSocket(url, protocols?, options?)
 Parses `url` to extract the remote hostname and port, finds or creates a `ClientConnection` to the Wisp base URL, and opens a stream to the remote target.
 
 <ParamField path="url" type="string" required>
-  A URL whose **last path segment** must be `hostname:port`. Everything before that final segment is treated as the Wisp server endpoint. For example:
+  A URL whose **last path segment** must be `hostname:port`. Everything before that final segment (plus a trailing slash) is used as the Wisp server endpoint. For example:
 
   ```
   wss://wisp.example.com/wisp/api.example.com:443
@@ -35,17 +35,17 @@ Parses `url` to extract the remote hostname and port, finds or creates a `Client
 </ParamField>
 
 <ParamField path="protocols" type="string | string[] | null" default="null">
-  Accepted for API compatibility with the DOM `WebSocket` constructor. Not used for subprotocol negotiation — Wisp streams are always binary.
+  Accepted for API compatibility with the DOM `WebSocket` constructor. Ignored — Wisp streams are always binary.
 </ParamField>
 
 <ParamField path="options" type="object">
-  Options forwarded verbatim to the `ClientConnection` constructor when a new connection is created for the Wisp base URL. Has no effect if a connection for that URL already exists.
+  Options forwarded verbatim to the `ClientConnection` constructor when a new connection is created for the Wisp base URL. Has no effect if a connection for that URL already exists in `_wisp_connections`.
 
   <Expandable title="options fields">
-    <ParamField path="options.wisp_version" type="number" default={2}>
+    <ParamField path="wisp_version" type="number" default={2}>
       Wisp protocol version to negotiate. See `ClientConnection` options.
     </ParamField>
-    <ParamField path="options.wisp_extensions" type="Array | null" default="null">
+    <ParamField path="wisp_extensions" type="Array | null" default="null">
       Extension instances to advertise. See `ClientConnection` options.
     </ParamField>
   </Expandable>
@@ -57,16 +57,16 @@ Parses `url` to extract the remote hostname and port, finds or creates a `Client
 
 These match the DOM `WebSocket` interface.
 
-<ResponseField name="readyState" type="number" >
-  Read-only getter. Returns the current connection state as one of the numeric constants below.
+<ResponseField name="readyState" type="number">
+  Read-only getter. Returns the current connection state as one of the numeric constants below. Note that `close()` does not transition through `CLOSING` — `readyState` moves from `OPEN` directly to `CLOSED` when the underlying stream's close callback fires.
 </ResponseField>
 
 <ResponseField name="bufferedAmount" type="number">
-  Read-only getter. Returns the total byte length of all messages queued in `stream.send_buffer` waiting for flow-control credit.
+  Read-only getter. Returns the total byte length of all messages queued in `stream.send_buffer` waiting for flow-control credit from the server.
 </ResponseField>
 
 <ResponseField name="binaryType" type="string">
-  Read/write. Controls how binary frames are delivered to `onmessage`. Accepted values are `'blob'` (default) and `'arraybuffer'`. Setting any other value throws at the next inbound message.
+  Read/write. Controls how binary frames are delivered to `onmessage`. Accepted values are `'blob'` (default) and `'arraybuffer'`. Setting any other value causes an error to be thrown when the next inbound message arrives.
 </ResponseField>
 
 <ResponseField name="extensions" type="string">
@@ -85,13 +85,13 @@ These match the DOM `WebSocket` interface.
 
 ### Constants
 
-These are set as instance properties as well as being the standard static values on the class.
+These are set as instance properties matching the standard DOM `WebSocket` constants.
 
 | Constant | Value | Meaning |
 |---|---|---|
 | `CONNECTING` | `0` | The stream has not yet opened. |
 | `OPEN` | `1` | The stream is open and data may be sent. |
-| `CLOSING` | `2` | `close()` has been called but the stream has not yet confirmed closure. |
+| `CLOSING` | `2` | Defined for interface compatibility; `readyState` does not pass through this state in the current implementation. |
 | `CLOSED` | `3` | The stream is closed. |
 
 ---
@@ -117,7 +117,7 @@ Sends data over the proxied stream. Accepts all common data types and normalises
 
 #### `close()`
 
-Sends a CLOSE packet with reason `0x02` (Voluntary) and transitions `readyState` toward `CLOSED`.
+Sends a CLOSE packet with reason `0x02` (Voluntary) by calling `this.stream.close(0x02)`. The `readyState` transitions to `CLOSED` when the stream's close callback fires.
 
 ```js
 socket.close();
@@ -127,7 +127,7 @@ socket.close();
 
 ### Event handlers
 
-Assign these properties or use `addEventListener` (inherited from `EventTarget`).
+Assign these properties directly or use `addEventListener` (inherited from `EventTarget`). Both styles fire for every event.
 
 <ResponseField name="onopen" type="(event: Event) => void">
   Fired when the stream opens and data can be sent. Also dispatched as an `"open"` event on the `EventTarget`.
@@ -142,14 +142,14 @@ Assign these properties or use `addEventListener` (inherited from `EventTarget`)
 </ResponseField>
 
 <ResponseField name="onerror" type="(event: Event) => void">
-  Fired if the underlying `ClientConnection` closes unexpectedly (i.e. while it still exists in `_wisp_connections`). Also dispatched as an `"error"` event.
+  Fired if the underlying `ClientConnection` closes unexpectedly while it still exists in `_wisp_connections`. Also dispatched as an `"error"` event.
 </ResponseField>
 
 ---
 
 ### EventTarget events
 
-`WispWebSocket` extends `EventTarget`, so you can also use `addEventListener`:
+`WispWebSocket` extends `EventTarget`, so `addEventListener` works alongside the legacy `on*` handler properties:
 
 ```js
 socket.addEventListener('open', () => console.log('open'));
@@ -162,23 +162,24 @@ socket.addEventListener('error', () => console.error('error'));
 
 ## `_wisp_connections` export
 
+`_wisp_connections` is a plain object that maps Wisp server base URLs to their shared `ClientConnection` instances. It is keyed by the Wisp base URL — the full constructor URL with its last `hostname:port` segment removed and a trailing slash appended.
+
 ```js
 import { _wisp_connections } from '@mercuryworkshop/wisp-js/client';
 ```
 
-`_wisp_connections` is a plain object that maps Wisp server base URLs to their shared `ClientConnection` instances:
-
-```
-{ "wss://wisp.example.com/wisp/": ClientConnection { ... } }
+```js
+// Example contents after creating a WispWebSocket:
+// { "wss://wisp.example.com/wisp/": ClientConnection { ... } }
 ```
 
 When a `WispWebSocket` is constructed, it checks `_wisp_connections[real_url]`:
 
-- **No entry** → a new `ClientConnection` is created and stored.
-- **Entry exists but not yet connected** → the new socket chains its `init_stream` call onto the existing `onopen` callback.
-- **Entry exists and connected** → the new socket calls `init_stream` immediately and reuses the connection.
+- **No entry** — a new `ClientConnection` is created and stored under `real_url`.
+- **Entry exists but not yet connected** — the new socket chains its `init_stream` call onto the existing `onopen` callback.
+- **Entry exists and connected** — the new socket calls `init_stream` immediately, reusing the connection.
 
-When the `ClientConnection` closes, its entry is removed from `_wisp_connections`. The next `WispWebSocket` for that URL will create a fresh connection.
+When the `ClientConnection` closes, its entry is deleted from `_wisp_connections`. The next `WispWebSocket` for that URL will create a fresh connection.
 
 <Warning>
   `_wisp_connections` is a module-level singleton. All `WispWebSocket` instances in the same JavaScript context share it. Avoid mutating it directly unless you need to force a reconnect.
@@ -197,11 +198,7 @@ import { WispWebSocket } from '@mercuryworkshop/wisp-js/client';
 window.WebSocket = WispWebSocket;
 ```
 
-After this assignment, any `new WebSocket('wss://target.example.com/path')` call elsewhere in the page is rewritten so that:
-- The last path segment (`target.example.com:443`) becomes the proxied destination.
-- Everything preceding it is used as the Wisp server URL.
-
-Ensure your Wisp server URL (e.g. `wss://wisp.example.com/wisp/`) is embedded as the URL prefix whenever third-party code constructs a WebSocket.
+After this assignment, any `new WebSocket('wss://target.example.com/path')` call elsewhere in the page is rewritten so that the last path segment (`target.example.com:443`) becomes the proxied destination and everything before it becomes the Wisp server URL. Ensure your Wisp server URL (e.g. `wss://wisp.example.com/wisp/`) is embedded as the URL prefix whenever third-party code constructs a WebSocket.
 
 ---
 
@@ -212,9 +209,10 @@ Ensure your Wisp server URL (e.g. `wss://wisp.example.com/wisp/`) is embedded as
 | Subprotocol negotiation | Via `protocols` constructor arg | Not supported — `protocol` always returns `"binary"` |
 | `binaryType` values | `'blob'` and `'arraybuffer'` | Same — but strings are UTF-8 encoded and sent as binary |
 | `extensions` property | Server-negotiated string | Always `""` |
-| TCP vs UDP | TCP only | TCP only for `WispWebSocket` streams (UDP requires `ClientConnection.create_stream` directly) |
+| TCP vs UDP | TCP only | TCP only via `WispWebSocket`; UDP requires `ClientConnection.create_stream` directly |
 | Connection sharing | One socket per instance | Multiple instances share one `ClientConnection` per Wisp URL |
 | Reconnection | None built-in | Automatic v2 → v1 fallback inside `ClientConnection` |
+| `CLOSING` state | Used during graceful close | Not set — `readyState` transitions directly from `OPEN` to `CLOSED` |
 
 ---
 

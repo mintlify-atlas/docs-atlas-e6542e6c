@@ -1,5 +1,5 @@
 ---
-title: "WsProxy: Raw WebSocket-to-TCP Proxying"
+title: "WsProxy: Single-Stream WebSocket-to-TCP Proxy Mode"
 sidebarTitle: "WsProxy"
 description: "Use WsProxy mode to tunnel a single TCP connection over WebSocket without the Wisp framing protocol — encoded as hostname:port in the URL path."
 ---
@@ -21,7 +21,7 @@ The Wisp server distinguishes WsProxy from Wisp connections using the URL path o
 
 The destination hostname and port are encoded as the **last segment of the URL path** in the format `hostname:port`:
 
-```
+```text
 ws://localhost:5001/example.com:80
 ws://localhost:5001/proxy/example.com:443
 ```

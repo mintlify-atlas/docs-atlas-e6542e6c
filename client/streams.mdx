@@ -1,7 +1,7 @@
 ---
-title: "Managing Wisp Client Streams"
+title: "Wisp Client Stream Lifecycle, Flow Control, and Close Codes"
 sidebarTitle: "Streams"
-description: "Deep dive into Wisp client stream lifecycle, flow control via CONTINUE packets, TCP vs UDP differences, and handling multiple concurrent streams."
+description: "Deep dive into ClientStream creation, TCP vs UDP behavioral differences, credit-based flow control via CONTINUE packets, and all close reason codes."
 ---
 
 A `ClientStream` is the unit of communication in Wisp. Each stream maps to exactly one remote TCP or UDP session and travels over a single underlying WebSocket connection alongside every other stream you have open. This page covers stream creation, the TCP/UDP behavioral differences, flow-control mechanics, close reasons, and patterns for managing multiple concurrent streams.
@@ -14,21 +14,19 @@ Call `connection.create_stream` to open a new stream:
 const stream = connection.create_stream(hostname, port, type);
 ```
 
-The method returns a `ClientStream` immediately — the CONNECT packet is transmitted to the server right away, but the remote TCP session may not yet be established. The stream's `open` flag reflects this: it is set to `true` only once the connection is fully `connected`.
-
-**`onopen` fires after the first CONTINUE packet** arrives for this stream, which signals that the server has successfully opened the remote connection and assigned a flow-control buffer:
+The method returns a `ClientStream` immediately — the CONNECT packet is transmitted to the server right away, but the remote TCP session may not yet be established. The stream's `open` flag is set to `connection.connected` at creation time: if the Wisp handshake is not yet complete, `open` starts as `false`.
 
 ```js
-const stream = connection.create_stream('example.com', 80);
-
-stream.onopen = () => {
-  // The remote connection is established.
-  // stream.buffer_size is now the initial server buffer allocation.
-  console.log('Stream open, initial buffer:', stream.buffer_size);
+connection.onopen = () => {
+  // Connection is fully handshaked — create_stream now returns a stream with open=true
+  const stream = connection.create_stream('example.com', 80);
+  console.log('Stream open flag:', stream.open); // true
 };
 ```
 
-Do not assume the stream is ready to carry data until `onopen` fires.
+<Note>
+`ClientStream` has an `onopen` property but the library never invokes it. To be notified when the Wisp connection is ready, use `connection.onopen`. Once that fires, any stream you create is immediately usable for sending data.
+</Note>
 
 ## TCP vs UDP Streams
 
@@ -47,7 +45,7 @@ const tcp3 = connection.create_stream('example.com', 80);
 
 ### UDP Streams (type `'udp'` / `0x02`)
 
-UDP streams bypass flow control entirely. Every `send()` call transmits immediately regardless of `buffer_size`:
+UDP streams bypass flow control entirely. Every `send()` call transmits immediately regardless of `buffer_size`. The `stream_type === stream_types.UDP` check in `send()` short-circuits the buffer check so no data is ever queued in `send_buffer` for UDP streams.
 
 ```js
 // DNS query over UDP
@@ -62,7 +60,6 @@ Key behavioral differences from TCP:
 |---|---|---|
 | Flow control | Yes — CONTINUE-based | No — sends immediately |
 | `send_buffer` queuing | Yes, when `buffer_size == 0` | Never queued |
-| `onopen` requirement | Fires after first CONTINUE | Fires after first CONTINUE |
 | Backpressure | Automatic via `send_buffer` | None — caller is responsible |
 
 <Note>
@@ -75,7 +72,7 @@ Wisp uses a credit-based flow-control model inspired by HTTP/2 window updates.
 
 ### How the Buffer Counter Works
 
-1. When the initial CONTINUE on **stream 0** arrives, `connection.max_buffer_size` is set to `buffer_remaining`. Every new `ClientStream` inherits this value as its initial `buffer_size`.
+1. When the initial CONTINUE on **stream 0** arrives during the handshake, `connection.max_buffer_size` is set to `buffer_remaining`. Every new `ClientStream` inherits this value as its initial `buffer_size`.
 2. Each successful `send()` call on a TCP stream decrements `stream.buffer_size` by 1.
 3. When `buffer_size` reaches `0`, the next `send()` pushes data onto `stream.send_buffer` instead of transmitting.
 4. When the server sends a CONTINUE packet for the stream, `continue_received(buffer_remaining)` is called:
@@ -109,7 +106,22 @@ console.log('Bytes buffered locally:', pendingBytes);
 
 ## Close Reasons
 
-When a stream closes — either because the remote server closed it or because an error occurred — `stream.onclose(reason)` is called with a numeric close reason code. The full set of codes is defined in `packet.mjs` as `close_reasons`:
+When a stream closes — either because the remote server closed it or because an error occurred — `stream.onclose(reason)` is called with a numeric close reason code. The full set of codes is defined in `packet.mjs` as `close_reasons`, accessible via the `packet` namespace:
+
+```js
+import { packet } from '@mercuryworkshop/wisp-js/client';
+const { close_reasons } = packet;
+
+stream.onclose = (reason) => {
+  if (reason === close_reasons.HostBlocked) {
+    console.error('Target host is blocked by the Wisp server.');
+  } else if (reason === close_reasons.Voluntary) {
+    console.log('Stream closed cleanly.');
+  } else {
+    console.warn('Stream closed with reason:', reason);
+  }
+};
+```
 
 ### Client or Server Reasons
 
@@ -146,21 +158,6 @@ When a stream closes — either because the remote server closed it or because a
 | `0xc1` | `AuthBadSignature` | Authentication failed: bad signature. |
 | `0xc2` | `AuthMissingCredentials` | Authentication failed: no credentials provided. |
 
-```js
-import { packet } from '@mercuryworkshop/wisp-js/client';
-const { close_reasons } = packet;
-
-stream.onclose = (reason) => {
-  if (reason === close_reasons.HostBlocked) {
-    console.error('Target host is blocked by the Wisp server.');
-  } else if (reason === close_reasons.Voluntary) {
-    console.log('Stream closed cleanly.');
-  } else {
-    console.warn('Stream closed with reason:', reason);
-  }
-};
-```
-
 ## Concurrent Streams
 
 Every `ClientConnection` multiplexes an unlimited number of streams over a single WebSocket. All open streams are tracked in `connection.active_streams`, keyed by their numeric stream ID:
@@ -184,25 +181,15 @@ for (const [id, stream] of Object.entries(connection.active_streams)) {
 The following example opens a single Wisp connection and fires two simultaneous HTTP GET requests over independent streams. Both responses are collected in parallel.
 
 ```js
-import { ClientConnection } from '@mercuryworkshop/wisp-js/client';
+import { client } from '@mercuryworkshop/wisp-js/client';
+const { ClientConnection } = client;
 
 const connection = new ClientConnection('wss://wisp.example.com/wisp/');
 
 function fetch_via_wisp(connection, host, path) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const stream = connection.create_stream(host, 80, 'tcp');
     const chunks = [];
-
-    stream.onopen = () => {
-      const request = [
-        `GET ${path} HTTP/1.0`,
-        `Host: ${host}`,
-        'Connection: close',
-        '',
-        '',
-      ].join('\r\n');
-      stream.send(new TextEncoder().encode(request));
-    };
 
     stream.onmessage = (data) => {
       chunks.push(data);
@@ -214,7 +201,15 @@ function fetch_via_wisp(connection, host, path) {
       resolve({ host, path, body, reason });
     };
 
-    stream.onerror = reject;
+    // Send the request immediately — TCP flow control handles buffering if needed
+    const request = [
+      `GET ${path} HTTP/1.0`,
+      `Host: ${host}`,
+      'Connection: close',
+      '',
+      '',
+    ].join('\r\n');
+    stream.send(new TextEncoder().encode(request));
   });
 }
 

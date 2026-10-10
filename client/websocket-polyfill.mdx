@@ -1,15 +1,18 @@
 ---
-title: "WispWebSocket: Drop-in WebSocket Polyfill"
+title: "WispWebSocket: Drop-in WebSocket Polyfill for Browsers"
 sidebarTitle: "WebSocket Polyfill"
-description: "Replace the browser's native WebSocket with WispWebSocket to tunnel connections through a Wisp server — with no code changes to the consuming application."
+description: "Replace the browser's native WebSocket with WispWebSocket to tunnel connections through a Wisp server with no changes to the consuming application's code."
 ---
 
 Many existing browser applications establish connections with `new WebSocket(url)`. Rewriting every call-site to use a Wisp-aware API is impractical. `WispWebSocket` solves this by implementing the standard `WebSocket` interface on top of a Wisp `ClientConnection`, so the consuming code keeps working without any modifications — the only change is swapping the constructor.
 
 ## Importing
 
+`WispWebSocket` and the shared connection map `_wisp_connections` are both exported from the `client` namespace inside the `@mercuryworkshop/wisp-js/client` entry-point:
+
 ```js
-import { WispWebSocket } from '@mercuryworkshop/wisp-js/client';
+import { client } from '@mercuryworkshop/wisp-js/client';
+const { WispWebSocket, _wisp_connections } = client;
 ```
 
 ## URL Format
@@ -17,23 +20,24 @@ import { WispWebSocket } from '@mercuryworkshop/wisp-js/client';
 `WispWebSocket` expects its first argument to be a URL in which the **last path segment** encodes the target host and port as `hostname:port`. Everything before that segment is treated as the Wisp server endpoint.
 
 ```
-wss://wisp.example.com/chat.example.com:443
-└─── Wisp endpoint ──┘└─── target host:port ─┘
+wss://wisp.example.com/wisp/chat.example.com:443
+└─────── Wisp endpoint ──────┘└─ target host:port ┘
 ```
 
 ```js
-// Connects to wisp.example.com/wisp/ and opens a TCP stream to chat.example.com:443
+// Connects to wss://wisp.example.com/wisp/ and opens a TCP stream to chat.example.com:443
 const ws = new WispWebSocket('wss://wisp.example.com/wisp/chat.example.com:443');
 ```
 
-Internally the class splits on the last `/`, uses the left portion (re-appended with `/`) as the Wisp endpoint URL, and parses `host` and `port` from the right portion.
+Internally the class splits the URL on `/`, pops the last segment, and parses it as `hostname:port`. The remaining segments are rejoined with a trailing `/` to form the Wisp endpoint URL (`this.real_url`).
 
 ## Shared Connections
 
-Multiple `WispWebSocket` instances that resolve to the **same Wisp endpoint URL** automatically reuse a single `ClientConnection`. The shared map is exported as `_wisp_connections`:
+Multiple `WispWebSocket` instances that resolve to the **same Wisp endpoint URL** automatically reuse a single `ClientConnection`. The shared map is exported as `_wisp_connections`, keyed by the resolved endpoint URL (with trailing `/`):
 
 ```js
-import { WispWebSocket, _wisp_connections } from '@mercuryworkshop/wisp-js/client';
+import { client } from '@mercuryworkshop/wisp-js/client';
+const { WispWebSocket, _wisp_connections } = client;
 
 const ws1 = new WispWebSocket('wss://wisp.example.com/wisp/api.example.com:443');
 const ws2 = new WispWebSocket('wss://wisp.example.com/wisp/cdn.example.com:80');
@@ -52,7 +56,7 @@ New `WispWebSocket` instances created while the shared connection is still in th
 
 | Method | Description |
 |---|---|
-| `send(data)` | Transmit data over the Wisp stream. Accepts `Uint8Array`, `string`, `Blob`, `ArrayBuffer`, and any `ArrayBufferView`. Strings are UTF-8 encoded automatically. |
+| `send(data)` | Transmit data over the Wisp stream. Accepts `Uint8Array`, `string`, `Blob`, `ArrayBuffer`, and any `ArrayBufferView` (e.g. `DataView`, `Int32Array`). Strings are UTF-8 encoded automatically. `Blob` values are read asynchronously via `.arrayBuffer()`. |
 | `close()` | Close the underlying stream with reason `0x02` (Voluntary). |
 
 ### Event Handlers
@@ -79,7 +83,7 @@ Assign callbacks directly, or use `addEventListener` (the class extends `EventTa
 
 ### Ready State Constants
 
-These match the values specified by the WebSocket standard and are available as both instance properties and as static-like values:
+These match the values specified by the WebSocket standard and are available as instance properties:
 
 | Constant | Value | Meaning |
 |---|---|---|
@@ -93,7 +97,8 @@ These match the values specified by the WebSocket standard and are available as 
 To proxy all `WebSocket` calls in an existing application through Wisp, reassign `window.WebSocket` before any other scripts run:
 
 ```js
-import { WispWebSocket } from '@mercuryworkshop/wisp-js/client';
+import { client } from '@mercuryworkshop/wisp-js/client';
+const { WispWebSocket } = client;
 
 // All subsequent `new WebSocket(url)` calls will use WispWebSocket instead.
 // The url must follow the hostname:port suffix convention.
@@ -107,8 +112,9 @@ This is typically done in an entry-point script or a service-worker `install` ha
 The third constructor argument, `options`, is forwarded directly to `ClientConnection`. Use this to configure the Wisp protocol version or extensions:
 
 ```js
-import { WispWebSocket } from '@mercuryworkshop/wisp-js/client';
-import { UDPExtension, MOTDExtension } from '@mercuryworkshop/wisp-js/client';
+import { client, extensions } from '@mercuryworkshop/wisp-js/client';
+const { WispWebSocket } = client;
+const { UDPExtension, MOTDExtension } = extensions;
 
 const ws = new WispWebSocket(
   'wss://wisp.example.com/wisp/chat.example.com:443',
@@ -131,6 +137,9 @@ When multiple `WispWebSocket` instances share the same endpoint, only the **firs
 `binaryType` defaults to `'blob'`, matching the native `WebSocket` default. Set it to `'arraybuffer'` before `onopen` fires if your application expects raw `ArrayBuffer` objects in `onmessage`:
 
 ```js
+import { client } from '@mercuryworkshop/wisp-js/client';
+const { WispWebSocket } = client;
+
 const ws = new WispWebSocket('wss://wisp.example.com/wisp/api.example.com:443');
 ws.binaryType = 'arraybuffer';
 
@@ -141,7 +150,7 @@ ws.onmessage = (event) => {
 };
 ```
 
-If `binaryType` is set to any value other than `'blob'` or `'arraybuffer'`, `send()` will throw `"invalid binaryType string"`.
+If `binaryType` is set to any value other than `'blob'` or `'arraybuffer'`, the `onmessage` handler will throw `"invalid binaryType string"`.
 </Note>
 
 ## TCP Only

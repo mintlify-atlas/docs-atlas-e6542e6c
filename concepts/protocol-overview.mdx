@@ -1,5 +1,5 @@
 ---
-title: "Wisp Protocol: Multiplexed WebSocket Streams"
+title: "Wisp Protocol: Multiplexing Streams over WebSocket"
 sidebarTitle: "Protocol Overview"
 description: "How the Wisp protocol multiplexes TCP and UDP streams over a single WebSocket connection, including v1 vs v2 handshake differences and stream lifecycle."
 ---
@@ -81,7 +81,7 @@ Either side may close a stream by sending a **CLOSE** packet with a one-byte rea
 
 ### Auto-detection and fallback
 
-The client always tries v2 first by requesting the `wisp-v2` WebSocket subprotocol. If the server does not speak v2 the WebSocket handshake fails with an error. The client's `onerror` handler intercepts this, resets `wisp_version` to `1`, clears the `onclose` listener to suppress the spurious close event, and immediately reconnects without a subprotocol. When the reconnected v1 session delivers its first packet (the stream-0 CONTINUE), the client detects that `info_received` is still `false` and confirms `wisp_version = 1`.
+The client always tries v2 first by requesting the `wisp-v2` WebSocket subprotocol. If the server does not speak v2 the WebSocket handshake fails with an error. The client's `onerror` handler intercepts this: it first clears the `onclose` listener on the current socket (suppressing the spurious close event), then calls `cleanup()`, sets `wisp_version = 1`, and immediately calls `connect_ws()` again without a subprotocol. When the reconnected v1 session delivers its first packet (the stream-0 CONTINUE), the client detects that `info_received` is still `false` and confirms `wisp_version = 1`.
 
 ---
 

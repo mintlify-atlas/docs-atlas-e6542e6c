@@ -1,5 +1,5 @@
 ---
-title: "Wisp Packet Classes and Binary Serialization"
+title: "Wisp Packet Classes: Binary Serialization API Reference"
 sidebarTitle: "Packets"
 description: "API reference for WispPacket, WispBuffer, and all payload classes — CONNECT, DATA, CONTINUE, CLOSE, INFO — including parse and serialize methods."
 ---
@@ -72,7 +72,7 @@ Returns a new `WispBuffer` containing the bytes of this buffer followed by the b
 
 #### `slice(index, size?)`
 
-Returns a new `WispBuffer` containing the bytes from `index` up to (but not including) `size`.
+Returns a new `WispBuffer` containing the bytes from `index` up to (but not including) `size`. The parameter is named `size` in the source but is passed directly to `Uint8Array.prototype.slice`, which treats it as an **end index**, not a length. Pass `index + length` when you want to extract a fixed number of bytes.
 
 <ParamField path="index" type="number" required>
   Start byte offset (inclusive).
@@ -401,28 +401,30 @@ Named constants for the stream type byte used in `ConnectPayload` and `ClientStr
 Named constants for all defined CLOSE reason codes.
 
 ```js
-// Client or server
-Unknown:               0x01,
-Voluntary:             0x02,
-NetworkError:          0x03,
-IncompatibleExtensions: 0x04,
+const close_reasons = {
+  // Client or server
+  Unknown:                0x01,
+  Voluntary:              0x02,
+  NetworkError:           0x03,
+  IncompatibleExtensions: 0x04,
 
-// Server only
-InvalidInfo:      0x41,
-UnreachableHost:  0x42,
-NoResponse:       0x43,
-ConnRefused:      0x44,
-TransferTimeout:  0x47,
-HostBlocked:      0x48,
-ConnThrottled:    0x49,
+  // Server only
+  InvalidInfo:      0x41,
+  UnreachableHost:  0x42,
+  NoResponse:       0x43,
+  ConnRefused:      0x44,
+  TransferTimeout:  0x47,
+  HostBlocked:      0x48,
+  ConnThrottled:    0x49,
 
-// Client only
-ClientError:      0x81,
+  // Client only
+  ClientError:      0x81,
 
-// Extension-specific
-AuthBadPassword:        0xc0,
-AuthBadSignature:       0xc1,
-AuthMissingCredentials: 0xc2,
+  // Extension-specific
+  AuthBadPassword:        0xc0,
+  AuthBadSignature:       0xc1,
+  AuthMissingCredentials: 0xc2,
+};
 ```
 
 ---

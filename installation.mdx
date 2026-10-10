@@ -1,7 +1,7 @@
 ---
-title: "Installing @mercuryworkshop/wisp-js"
+title: "Installing @mercuryworkshop/wisp-js for Node.js or Browser"
 sidebarTitle: "Installation"
-description: "Install the wisp-js npm package for server-side Node.js use or browser-side bundling, with CommonJS and ESM export options."
+description: "How to install @mercuryworkshop/wisp-js from npm, choose the right import entrypoint for browser or Node.js, and build CommonJS bundles from source."
 ---
 
 `@mercuryworkshop/wisp-js` is a dual-environment package. The **server entrypoint** runs on Node.js and uses the built-in `net` and `dgram` modules to open real TCP and UDP sockets on behalf of Wisp clients. The **client entrypoint** is browser-friendly and has no Node.js dependencies, making it safe to bundle with webpack, Vite, or any other modern bundler. Both environments share the same packet and extension modules.
@@ -51,7 +51,7 @@ const { routeRequest, options } = server;
 ```js
 import { client, packet, extensions } from "@mercuryworkshop/wisp-js/client";
 
-const { ClientConnection, WispWebSocket } = client;
+const { ClientConnection, WispWebSocket, _wisp_connections } = client;
 ```
 
 ### Server only (Node.js)

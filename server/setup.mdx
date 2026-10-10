@@ -1,5 +1,5 @@
 ---
-title: "Integrating the Wisp Server into Node.js"
+title: "Setting Up the Wisp Server in a Node.js Application"
 sidebarTitle: "Setup"
 description: "Add a Wisp server to an existing Node.js HTTP server using routeRequest, handle WebSocket upgrades, and serve both Wisp and WsProxy connections."
 ---
@@ -33,14 +33,15 @@ httpServer.listen(5001, () => {
 The server entrypoint re-exports everything you need for most use cases. You can destructure specific namespaces in a single import:
 
 ```js
-import { server as wisp, logging, extensions } from "@mercuryworkshop/wisp-js/server";
+import { server as wisp, packet, logging, extensions } from "@mercuryworkshop/wisp-js/server";
 ```
 
 | Export | Description |
 |---|---|
-| `server` | Core server API: `routeRequest`, `ServerConnection`, `options` |
+| `server` | Core server API: `routeRequest`, `parse_real_ip`, `ServerConnection`, `ServerStream`, `options` |
+| `packet` | Packet types and payload classes: `WispPacket`, `WispBuffer`, `ConnectPayload`, `DataPayload`, etc. |
 | `logging` | Log level control and custom log handler |
-| `extensions` | Wisp v2 extension helpers (`MOTDExtension`, `UDPExtension`, etc.) |
+| `extensions` | Wisp v2 extension helpers (`MOTDExtension`, `UDPExtension`, `PasswordAuthExtension`, etc.) |
 
 ## How `routeRequest` Works
 
@@ -82,7 +83,7 @@ Each custom socket class must implement the following async interface:
 Pass your implementations via `conn_options`:
 
 ```js
-import { ServerConnection } from "@mercuryworkshop/wisp-js/server";
+import { server as wisp } from "@mercuryworkshop/wisp-js/server";
 
 class MyTCPSocket {
   constructor(hostname, port) { /* ... */ }
@@ -117,16 +118,14 @@ httpServer.on("upgrade", (request, socket, head) => {
 
 ## Ping Interval
 
-The server sends WebSocket-level `ping` frames on a fixed interval to keep idle connections alive and detect dropped clients. The default interval is **30 seconds**.
+The server sends WebSocket-level `ping` frames on a fixed interval to keep idle connections alive and detect dropped clients. The default interval is **30 seconds**. Because `ping_interval` is a per-connection setting on `ServerConnection` rather than a global option, configure it through the `conn_options` argument of `routeRequest`:
 
 ```js
-// Globally adjust the ping interval to 60 seconds
-wisp.options.ping_interval = 60;
-
-// Or per-connection
 httpServer.on("upgrade", (request, socket, head) => {
   wisp.routeRequest(request, socket, head, { ping_interval: 60 });
 });
 ```
 
-Set `ping_interval` to `0` or a very large number to effectively disable pings. Note that pings are only sent when the underlying WebSocket implementation exposes a `ping()` method (i.e., on Node.js with the `ws` package — browser-side WebSockets do not support pings).
+<Note>
+  `ping_interval` is not part of the global `wisp.options` object. It can only be set per-connection via the `conn_options` argument. Pings are only sent when the underlying WebSocket implementation exposes a `ping()` method — this applies when running on Node.js with the `ws` package. Browser-side WebSockets do not support server-initiated pings.
+</Note>

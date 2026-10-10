@@ -1,7 +1,7 @@
 ---
-title: "Filtering and Access Control for Wisp Streams"
+title: "Wisp Server Connection Filtering and Access Control"
 sidebarTitle: "Filtering"
-description: "Control which hosts, ports, and IP ranges the Wisp server will proxy — using hostname/port whitelists and blacklists, IP restrictions, and stream count limits."
+description: "Control which hosts, ports, and IP ranges the Wisp server proxies — using hostname and port whitelists, blacklists, IP restrictions, and stream limits."
 ---
 
 Every stream request — whether from a Wisp connection or a WsProxy connection — passes through the server's filtering system before any TCP or UDP socket is opened. If a stream fails any check, the server sends a `CLOSE` packet with an appropriate reason code and never establishes the outbound connection. This makes filtering a safe, server-enforced boundary that clients cannot bypass.

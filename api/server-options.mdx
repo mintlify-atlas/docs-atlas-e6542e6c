@@ -1,7 +1,7 @@
 ---
-title: "Server Options Configuration Reference"
+title: "Server Options: Complete Wisp Configuration Reference"
 sidebarTitle: "Server Options"
-description: "Complete reference for all wisp.options properties — control hostname filtering, IP restrictions, stream limits, DNS resolution, and Wisp v2 protocol settings."
+description: "Complete reference for all wisp.options properties, covering hostname filters, IP rules, stream limits, DNS resolution, and Wisp v2 protocol settings."
 ---
 
 `wisp.options` is a plain mutable object that controls every aspect of the server's runtime behaviour. Changes take effect immediately for all new connections and streams — no restart required. The object is exported as part of the `server` namespace and is also used internally by `ServerConnection`, `WSProxyConnection`, and the filter and DNS modules.
@@ -79,6 +79,22 @@ These options control which hostnames, IP addresses, and ports the server is wil
 ## Client Connection Restrictions
 
 These options cap how many streams a client can open and which transport protocols are permitted.
+
+<ParamField path="client_ip_blacklist" type="string[] | null" default={null}>
+  An array of client IP addresses to refuse connections from. If the connecting client's IP is in this list, the connection is blocked.
+
+  <Warning>
+    This option is **not yet implemented**. Setting it has no effect in the current version. Do not rely on it for access control.
+  </Warning>
+</ParamField>
+
+<ParamField path="client_ip_whitelist" type="string[] | null" default={null}>
+  An array of client IP addresses that are exclusively permitted to connect. All other clients are refused.
+
+  <Warning>
+    This option is **not yet implemented**. Setting it has no effect in the current version. Do not rely on it for access control.
+  </Warning>
+</ParamField>
 
 <ParamField path="allow_tcp_streams" type="boolean" default={true}>
   When `false`, all `CONNECT` packets requesting a TCP stream are refused with `HostBlocked`. Clients that need only UDP (e.g. DNS-over-UDP relays) can be served with TCP disabled.
@@ -205,6 +221,8 @@ Object.assign(wisp.options, {
   allow_loopback_ips: false,      // Block 127.x.x.x / ::1
 
   // --- Client Connection Restrictions ---
+  client_ip_blacklist: null,      // Not implemented — no client IP blacklist
+  client_ip_whitelist: null,      // Not implemented — no client IP whitelist
   allow_tcp_streams: true,        // Allow TCP streams
   allow_udp_streams: true,        // Allow UDP streams
   stream_limit_per_host: -1,      // Unlimited streams per destination host

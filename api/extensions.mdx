@@ -1,5 +1,5 @@
 ---
-title: "Wisp Extension Classes API Reference"
+title: "Wisp Extensions API: BaseExtension and Protocol Negotiation"
 sidebarTitle: "Extensions"
 description: "API reference for BaseExtension, UDPExtension, PasswordAuthExtension, MOTDExtension, and the parse_extensions / serialize_extensions utility functions."
 ---
@@ -192,7 +192,11 @@ new PasswordAuthExtension.Client({ username, password })
 
 #### `PasswordAuthExtension.Client.parse(buffer)`
 
-Reads `username_len` from byte 0, `password_len` from bytes 1–2 (little-endian), then decodes the username and password strings.
+Reads `username_len` from byte 0 (u8) and `password_len` from bytes 1–2 (u16 LE). Computes `password_index = username_len + 3`. Decodes the username as `buffer.slice(3, username_len)` and the password as `buffer.slice(password_index, password_len)`.
+
+<Note>
+`WispBuffer.slice(index, size)` passes both arguments directly to `Uint8Array.slice`, which treats the second argument as an **end index**, not a length. The username bytes are therefore `buffer.bytes[3..username_len]` and the password bytes are `buffer.bytes[password_index..password_len]`. This is an internal detail of the parse implementation; the wire format produced by `serialize()` is correct.
+</Note>
 
 **Returns** an instance of `PasswordAuthExtension.Client`.
 
@@ -271,7 +275,13 @@ connection.server_motd // "Welcome to Wisp!" or null
 
 ## `parse_extensions(payload_buffer, valid_extensions, role)`
 
+<Note>
+This function is used internally by `ClientConnection` and `ServerConnection` during the Wisp v2 INFO handshake. You do not need to call it directly in normal usage.
+</Note>
+
 Iterates over the concatenated extension bytes in an INFO packet payload, matches each extension by ID against the `valid_extensions` list, and returns the successfully parsed extensions.
+
+The iteration loop maintains a local `index` variable that is initialized to `0` but **never incremented**. Advancement through the buffer is achieved by re-assigning `payload_buffer = payload_buffer.slice(5 + ext_len)` after each extension, so `ext_id` and `ext_len` are always read from offset 0 of the remaining slice. The loop terminates when `payload_buffer.size` reaches zero.
 
 <ParamField path="payload_buffer" type="WispBuffer" required>
   The raw extension bytes from an `InfoPayload.extensions` buffer — a sequence of serialized extensions, each with its own 5-byte header.

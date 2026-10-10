@@ -1,7 +1,7 @@
 ---
-title: "routeRequest and parse_real_ip Functions"
+title: "routeRequest and parse_real_ip Function API Reference"
 sidebarTitle: "routeRequest"
-description: "API reference for routeRequest and parse_real_ip — the server-side helpers that handle WebSocket upgrade requests and extract the real client IP from proxy headers."
+description: "Reference for routeRequest and parse_real_ip — server helpers that upgrade HTTP connections to WebSocket Wisp sessions and resolve real client IPs."
 ---
 
 `routeRequest` and `parse_real_ip` are the two top-level server helper functions. `routeRequest` is the single entry point for all incoming WebSocket upgrade requests — it upgrades the connection, inspects the URL path, and dispatches to either `ServerConnection` (full Wisp multiplexing) or `WSProxyConnection` (single-stream TCP proxy). `parse_real_ip` is used internally by `routeRequest` to extract the real client address from reverse-proxy headers, but it can also be called directly when you need that information elsewhere.

@@ -1,7 +1,7 @@
 ---
-title: "ServerConnection and ServerStream API"
+title: "ServerConnection and ServerStream API Reference Guide"
 sidebarTitle: "ServerConnection"
-description: "API reference for ServerConnection and ServerStream — the core classes that manage a Wisp server-side WebSocket connection and its multiplexed TCP/UDP streams."
+description: "Reference for ServerConnection and ServerStream — the core server classes managing a Wisp WebSocket session lifecycle and multiplexed TCP/UDP streams."
 ---
 
 `ServerConnection` and `ServerStream` are the two central classes that power the Wisp server. A `ServerConnection` owns the WebSocket transport and manages the full lifecycle of a single client connection — performing the Wisp handshake, dispatching packets, and tracking every open stream. Each individual proxied TCP or UDP channel is represented by a `ServerStream`, which bridges the WebSocket send-buffer with the underlying network socket.
